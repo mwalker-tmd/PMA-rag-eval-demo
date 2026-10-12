@@ -21,6 +21,7 @@ from rag_chatbot.ports.datasets import DatasetRepository
 from rag_chatbot.ports.llm import LLMPort
 from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.chat_service import ChatService
+from rag_chatbot.services.jobs import JobRunner
 
 
 class ConfigError(Exception):
@@ -66,6 +67,8 @@ class Container:
     datasets: DatasetRepository
     testset_generator: TestsetGeneratorPort
     specs: dict[str, PipelineSpec] = field(default_factory=lambda: dict(PIPELINES))
+    # One runner per container (the app caches one container per process), so jobs are shared and run one at a time.
+    jobs: JobRunner = field(default_factory=JobRunner)
     _service: ChatService | None = None
 
     def start(self, progress: Progress = lambda _msg: None) -> ChatService:
