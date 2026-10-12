@@ -53,6 +53,22 @@ container.py — composition root; the only place concrete adapters are chosen
   - `sdg/`: the Ragas and fake test set generators. Ragas is imported only when
     generation actually runs.
 
+### Background jobs
+
+Test set generation and evaluations take minutes, so the UI runs them as background jobs
+through `services/jobs.py` → `JobRunner`, owned by the container:
+
+- **One job at a time.** Starting a second job while one is queued or running raises
+  `JobAlreadyRunning`. This keeps API rate limits under control, and avoids two jobs
+  writing to the embedded Qdrant index at once.
+- **In-process.** Jobs run on a worker thread in the Streamlit server process. Their
+  status survives page reloads and is shared across tabs, because the container is
+  cached. It **does not survive a server restart**. Services that need durable status,
+  such as evaluation runs, record it in their own storage.
+- **Status as snapshots.** `status()`, `active()` and `recent()` return immutable
+  `JobStatus` snapshots (state, progress, message, error, result id). The UI polls
+  them, and never sees a half-updated job.
+
 Every port has a shared **contract test suite** (`tests/test_*_contract.py`). Each
 adapter of that port must pass it, which is what makes the adapters interchangeable.
 
