@@ -64,9 +64,10 @@ def test_create_rejects_a_taken_id(repo, run):
         lambda m: replace(m, run_id="run_ok\n"),
         lambda m: replace(m, run_id="../escape"),
         lambda m: replace(m, progress=1.5),
+        lambda m: replace(m, progress=True),
         lambda m: replace(m, aggregate={"faithfulness": float("nan")}),
     ],
-    ids=["status", "finished_at", "error", "naive", "non-utc", "newline-id", "path-id", "progress", "nan"],
+    ids=["status", "finished_at", "error", "naive", "non-utc", "newline-id", "path-id", "progress", "bool-progress", "nan"],
 )
 def test_create_rejects_an_invalid_new_run(repo, bad):
     with pytest.raises(ValueError):
@@ -82,7 +83,7 @@ def test_update_progress_is_reflected(repo, run):
     assert repo.get(run.run_id).manifest.progress is None
 
 
-@pytest.mark.parametrize("progress", [-0.1, 1.01, float("nan")])
+@pytest.mark.parametrize("progress", [-0.1, 1.01, float("nan"), True, False])
 def test_update_progress_rejects_out_of_range_values(repo, run, progress):
     with pytest.raises(ValueError):
         repo.update_progress(run.run_id, progress, "bad")
@@ -192,3 +193,27 @@ def test_stored_runs_are_isolated_from_caller_mutation(repo):
     got = repo.get(m.run_id)
     assert got.manifest.pipeline_settings["k"] == 3
     assert "tampered" not in got.samples[0].retrieved_contexts
+
+
+# Run state is checked before the input: an unknown or finished run reports that, whatever the input.
+NAN = float("nan")
+BAD_WRITES = {
+    "progress": lambda repo, run_id: repo.update_progress(run_id, True, "bad progress"),
+    "complete": lambda repo, run_id: repo.complete(run_id, [], {"faithfulness": NAN}, judge_usage=None, answer_usage=None),
+    "fail": lambda repo, run_id: repo.fail(
+        run_id, "boom", samples=[replace(make_sample_results(1)[0], scores={"faithfulness": NAN})]
+    ),
+}
+
+
+@pytest.mark.parametrize("write", BAD_WRITES.values(), ids=BAD_WRITES.keys())
+def test_bad_input_to_an_unknown_run_reports_not_found(repo, write):
+    with pytest.raises(RunNotFound):
+        write(repo, "run_20260101-000000_baseline_ffff")
+
+
+@pytest.mark.parametrize("write", BAD_WRITES.values(), ids=BAD_WRITES.keys())
+def test_bad_input_to_a_finished_run_reports_finalized(repo, run, write):
+    repo.complete(run.run_id, [], {}, judge_usage=None, answer_usage=None)
+    with pytest.raises(RunFinalized):
+        write(repo, run.run_id)

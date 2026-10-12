@@ -23,6 +23,7 @@ dependencies = [
     "streamlit>=1.40",
     "ragas==0.2.10",
     "rapidfuzz>=3.0.0",  # needed by Ragas test set generation (string distance), not declared by ragas itself
+    "portalocker>=3.2.0",  # cross-process file lock for the evaluation run store
 ]
 
 [dependency-groups]

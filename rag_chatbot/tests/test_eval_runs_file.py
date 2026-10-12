@@ -49,7 +49,10 @@ def test_a_crash_between_samples_and_manifest_leaves_the_run_running_and_finisha
     monkeypatch.undo()
 
     reopened = FileEvalRunRepository(root)
-    assert reopened.get(m.run_id).manifest.status is RunStatus.RUNNING  # the manifest is the commit point
+    assert (root / m.run_id / "samples.jsonl").exists()  # written, but not committed
+    uncommitted = reopened.get(m.run_id)
+    assert uncommitted.manifest.status is RunStatus.RUNNING  # the manifest is the commit point
+    assert uncommitted.samples == []  # so the uncommitted samples aren't exposed
     reopened.fail(m.run_id, "Interrupted (server restarted)")  # e.g. recovery at startup
     assert reopened.get(m.run_id).manifest.status is RunStatus.FAILED
 
@@ -122,14 +125,18 @@ def test_readers_never_see_a_torn_manifest_while_a_job_writes(root):
     done, errors = threading.Event(), []
 
     def writer():
-        for i in range(1, 301):
-            repo.update_progress(m.run_id, i / 300, f"step {i}")
-        done.set()
+        try:
+            for i in range(1, 301):
+                repo.update_progress(m.run_id, i / 300, f"step {i}")
+        except Exception as e:  # report it instead of leaving the reader spinning
+            errors.append(f"writer: {e!r}")
+        finally:
+            done.set()
 
     reader_repo = FileEvalRunRepository(root)  # a separate instance, like another part of the app
     t = threading.Thread(target=writer)
     t.start()
-    while not done.is_set():
+    while not done.wait(0):
         try:
             got = reader_repo.get(m.run_id).manifest
             if got.message != "Starting" and got.message != f"step {round(got.progress * 300)}":
@@ -137,8 +144,72 @@ def test_readers_never_see_a_torn_manifest_while_a_job_writes(root):
             reader_repo.list()
         except Exception as e:  # e.g. JSONDecodeError from a half-written file
             errors.append(repr(e))
-    t.join()
+    t.join(10)
     assert errors == []
+
+
+def _finish_in_another_process(root, run_id, outcome, barrier, results):
+    """Runs in a child process: finish the run with this process's own outcome."""
+    from factories import make_sample_results
+
+    from rag_chatbot.adapters.eval_runs.file_repository import FileEvalRunRepository
+    from rag_chatbot.domain.evals import RunFinalized
+
+    repo = FileEvalRunRepository(root)
+    barrier.wait()
+    try:
+        if outcome == "complete":
+            repo.complete(run_id, make_sample_results(2), {"faithfulness": 0.9}, judge_usage=None, answer_usage=None)
+        else:
+            repo.fail(run_id, "failed in the other process", samples=make_sample_results(1))
+        results.put((outcome, "won"))
+    except RunFinalized:
+        results.put((outcome, "finalized"))
+
+
+def _assert_single_winner(repo, run_id, outcomes):
+    assert sorted(r for _, r in outcomes) == ["finalized", "won"]
+    winner = next(o for o, r in outcomes if r == "won")
+    got = repo.get(run_id)
+    if winner == "complete":
+        assert got.manifest.status is RunStatus.COMPLETED and len(got.samples) == 2
+    else:
+        assert got.manifest.status is RunStatus.FAILED and len(got.samples) == 1
+
+
+def test_two_instances_cannot_both_finish_a_run(root):
+    import queue
+    import threading
+
+    FileEvalRunRepository(root).create(make_run_manifest())
+    barrier, results = threading.Barrier(2), queue.Queue()
+    threads = [
+        threading.Thread(target=_finish_in_another_process, args=(root, "run_20261012-090000_baseline_ab12", o, barrier, results))
+        for o in ("complete", "fail")
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    outcomes = [results.get_nowait() for _ in range(2)]
+    _assert_single_winner(FileEvalRunRepository(root), "run_20261012-090000_baseline_ab12", outcomes)
+
+
+def test_two_processes_cannot_both_finish_a_run(root):
+    import multiprocessing
+
+    run_id = "run_20261012-090000_baseline_ab12"
+    FileEvalRunRepository(root).create(make_run_manifest(run_id))
+    ctx = multiprocessing.get_context("spawn")
+    barrier, results = ctx.Barrier(2), ctx.Queue()
+    procs = [ctx.Process(target=_finish_in_another_process, args=(root, run_id, o, barrier, results)) for o in ("complete", "fail")]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+        assert p.exitcode == 0
+    outcomes = [results.get(timeout=5) for _ in range(2)]
+    _assert_single_winner(FileEvalRunRepository(root), run_id, outcomes)
 
 
 def test_the_container_stores_runs_under_evals_dir(container, settings):

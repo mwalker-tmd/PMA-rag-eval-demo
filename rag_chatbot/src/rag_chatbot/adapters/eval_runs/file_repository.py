@@ -10,8 +10,11 @@ Every file is written to a temporary file in the same folder and moved into plac
 version. On complete/fail the samples are written first and the manifest last: the manifest's
 status is the commit point. Leftover temporary files are removed when the repository is created.
 
-Writes are serialized within this process by a lock. Evaluations are run by one process at a
-time (the app, or the CLI with the app stopped, since both need the vector index).
+Writes are serialized for every instance and process that uses the same folder: an in-process
+lock shared by all instances on that folder, plus an exclusive file lock on `<root>/.lock`. The
+"is this run already final?" check happens while both are held, so two writers can never both
+finish a run. Reads take no lock; they rely on the atomic replaces and only expose a run's
+samples once its manifest is final.
 """
 
 from __future__ import annotations
@@ -21,10 +24,13 @@ import os
 import shutil
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
+
+import portalocker
 
 from rag_chatbot.adapters.eval_runs.serialization import (
     manifest_from_dict,
@@ -53,13 +59,24 @@ from rag_chatbot.domain.models import TokenUsage
 MANIFEST = "manifest.json"
 SAMPLES = "samples.jsonl"
 TMP_MARKER = ".tmp-"
+LOCK_FILE = ".lock"
+LOCK_TIMEOUT_SECONDS = 30
+
+# One in-process lock per store folder, shared by every repository instance pointed at it.
+_ROOT_LOCKS: dict[Path, threading.Lock] = {}
+_ROOT_LOCKS_GUARD = threading.Lock()
+
+
+def _root_lock(root: Path) -> threading.Lock:
+    with _ROOT_LOCKS_GUARD:
+        return _ROOT_LOCKS.setdefault(root.resolve(), threading.Lock())
 
 
 class FileEvalRunRepository:
     def __init__(self, root: Path, *, clock: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
+        self._lock = _root_lock(self.root)
         self._clock = clock
         for leftover in self.root.glob(f"*/.*{TMP_MARKER}*"):
             leftover.unlink(missing_ok=True)
@@ -67,7 +84,7 @@ class FileEvalRunRepository:
     def create(self, manifest: EvalRunManifest) -> None:
         validate_new_run(manifest)
         folder = self.root / manifest.run_id
-        with self._lock:
+        with self._writing():
             try:
                 folder.mkdir()  # exclusive: an existing folder means the id is taken
             except FileExistsError:
@@ -79,8 +96,9 @@ class FileEvalRunRepository:
                 raise
 
     def update_progress(self, run_id: str, progress: float | None, message: str) -> None:
-        validate_progress(progress)
-        self._change(run_id, lambda m: replace(m, progress=progress, message=message))
+        self._change(
+            run_id, lambda m: replace(m, progress=progress, message=message), validate=lambda: validate_progress(progress)
+        )
 
     def complete(
         self,
@@ -90,7 +108,6 @@ class FileEvalRunRepository:
         judge_usage: TokenUsage | None,
         answer_usage: TokenUsage | None,
     ) -> None:
-        validate_results(samples, aggregate)
         self._change(
             run_id,
             lambda m: replace(
@@ -103,24 +120,28 @@ class FileEvalRunRepository:
                 answer_usage=answer_usage,
             ),
             samples=samples,
+            validate=lambda: validate_results(samples, aggregate),
         )
 
     def fail(self, run_id: str, error: str, samples: list[SampleResult] | None = None) -> None:
-        validate_results(samples or [], {})
         self._change(
-            run_id, lambda m: replace(m, status=RunStatus.FAILED, finished_at=self._clock(), error=error), samples=samples
+            run_id,
+            lambda m: replace(m, status=RunStatus.FAILED, finished_at=self._clock(), error=error),
+            samples=samples,
+            validate=lambda: validate_results(samples or [], {}),
         )
 
     def get(self, run_id: str) -> EvalRun:
-        with self._lock:
-            folder = self._folder(run_id)
-            manifest = self._read_manifest(folder)
-            samples_path = folder / SAMPLES
-            samples = []
-            if samples_path.exists():
-                with samples_path.open(encoding="utf-8") as f:
-                    samples = [sample_from_dict(json.loads(line)) for line in f if line.strip()]
-            return EvalRun(manifest=manifest, samples=samples)
+        folder = self._folder(run_id)
+        manifest = self._read_manifest(folder)
+        samples: list[SampleResult] = []
+        # Samples are written before the manifest commits the run, so only trust them once it's final;
+        # until then they may belong to a complete()/fail() that's still in progress or crashed.
+        samples_path = folder / SAMPLES
+        if manifest.is_final and samples_path.exists():
+            with samples_path.open(encoding="utf-8") as f:
+                samples = [sample_from_dict(json.loads(line)) for line in f if line.strip()]
+        return EvalRun(manifest=manifest, samples=samples)
 
     def list(
         self,
@@ -130,24 +151,32 @@ class FileEvalRunRepository:
         batch_id: str | None = None,
         status: RunStatus | None = None,
     ) -> list[EvalRunSummary]:
-        with self._lock:
-            summaries = [
-                EvalRunSummary.from_manifest(self._read_manifest(folder))
-                for folder in self.root.iterdir()
-                if folder.is_dir() and not folder.name.startswith(".") and (folder / MANIFEST).exists()
-            ]
+        summaries = [
+            EvalRunSummary.from_manifest(self._read_manifest(folder))
+            for folder in self.root.iterdir()
+            if folder.is_dir() and not folder.name.startswith(".") and (folder / MANIFEST).exists()
+        ]
         return sort_newest_first(
             [s for s in summaries if matches(s, testset_id=testset_id, pipeline=pipeline, batch_id=batch_id, status=status)]
         )
 
     # --- internals ---
 
-    def _change(self, run_id: str, change, samples: list[SampleResult] | None = None) -> None:
-        with self._lock:
+    @contextmanager
+    def _writing(self) -> Iterator[None]:
+        """Exclusive write access to this store, across instances (shared lock) and processes (file lock)."""
+        with self._lock, portalocker.Lock(self.root / LOCK_FILE, mode="a", timeout=LOCK_TIMEOUT_SECONDS):
+            yield
+
+    def _change(self, run_id: str, change, samples: list[SampleResult] | None = None, validate=lambda: None) -> None:
+        """Apply a write. Existence and finality are checked first (under the write lock), then the input,
+        so an unknown or finished run always reports RunNotFound / RunFinalized, whatever the input."""
+        with self._writing():
             folder = self._folder(run_id)
             manifest = self._read_manifest(folder)
             if manifest.is_final:
                 raise RunFinalized(f"{run_id} is {manifest.status.value}")
+            validate()
             if samples is not None:
                 lines = "".join(json.dumps(sample_to_dict(s), ensure_ascii=False) + "\n" for s in samples)
                 _atomic_write(folder / SAMPLES, lines)

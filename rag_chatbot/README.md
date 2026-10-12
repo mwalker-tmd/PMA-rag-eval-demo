@@ -187,8 +187,11 @@ Evaluation runs are saved under `EVALS_DIR` (default `.evals/`), one folder per 
   keeps the samples answered before the failure.
 - **Crash-safe:** every file is written to a temporary file and moved into place, so a
   reader sees either the previous version or the next, never half a file. The manifest
-  is written last, so its status is what counts. A run left `running` by a crash can
-  still be marked failed.
+  is written last, so its status is what counts. A run's samples are only shown once
+  it's finished. A run left `running` by a crash can still be marked failed.
+- **One writer at a time:** writes take a lock shared by every repository instance in
+  the process, plus a file lock on `.evals/.lock` across processes. So two writers can
+  never both finish the same run.
 - **Scores** are numbers or `None`. `NaN` and infinity are rejected: JSON can't hold
   them, and a metric that couldn't be scored is stored as `None`.
 - `.evals/` is git-ignored. Runs contain questions, answers and passages from the PDFs.

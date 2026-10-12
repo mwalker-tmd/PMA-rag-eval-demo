@@ -159,7 +159,9 @@ def _check_score(name: str, value: float | None) -> None:
 
 
 def _check_progress(progress: float | None) -> None:
-    if progress is not None and (not isinstance(progress, (int, float)) or not 0.0 <= progress <= 1.0):
+    if progress is not None and (
+        isinstance(progress, bool) or not isinstance(progress, (int, float)) or not 0.0 <= progress <= 1.0
+    ):
         raise ValueError(f"progress must be between 0 and 1, or None; got {progress!r}")
 
 
