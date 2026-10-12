@@ -58,10 +58,12 @@ container.py — composition root; the only place concrete adapters are chosen
   - `llm.py`: `LLMPort`, for text generation
   - `datasets.py`: `DatasetRepository`, for saving and loading test sets
   - `testset_generator.py`: `TestsetGeneratorPort`, for generating synthetic test samples
+  - `eval_runs.py`: `EvalRunRepository`, for saving evaluation runs and reading them back
 - `adapters/` contains the implementations:
   - `llm/`: the OpenAI and fake LLM adapters. The UI's reasoning-level list comes from
     `supported_reasoning_efforts()`.
   - `datasets/`: the file-based and in-memory test set repositories
+  - `eval_runs/`: the file-based and in-memory evaluation run repositories
   - `sdg/`: the Ragas and fake test set generators. Ragas is imported only when
     generation actually runs.
 
@@ -169,6 +171,39 @@ per test set:
   an interrupted save never leaves a partial test set behind.
 - `.datasets/` is git-ignored. Test sets contain passages from the PDFs, which are
   never committed.
+
+## Evaluation runs (storage)
+
+Evaluation runs are saved under `EVALS_DIR` (default `.evals/`), one folder per run:
+
+```
+.evals/<run_id>/manifest.json   # test set, pipeline + settings, models, status, progress, aggregate scores, usage
+.evals/<run_id>/samples.jsonl   # per question: answer, retrieved contexts, scores, latency, usage, error
+```
+
+- **Lifecycle:** a run is created as `running`. Its progress is updated as it goes, then
+  it ends as `completed` or `failed`. A finished run is **final**: any further write is
+  rejected (`RunFinalized`), so a result can't be changed after the fact. A failed run
+  keeps the samples answered before the failure.
+- **Crash-safe:** every file is written to a temporary file and moved into place, so a
+  reader sees either the previous version or the next, never half a file. The manifest
+  is written last, so its status is what counts. A run's samples are only shown once
+  it's finished. A run left `running` by a crash can still be marked failed. Failing it
+  without samples discards anything an interrupted completion left behind.
+- **Startup cleanup:** a new repository removes leftover temp files, and run folders
+  whose creation was interrupted before the manifest was written. It does this while
+  holding the write lock, so it never touches another writer's in-progress files.
+- **One writer at a time:** writes take a lock shared by every repository instance in
+  the process, plus a file lock on `.evals/.lock` across processes. So two writers can
+  never both finish the same run.
+- **Stays inside `.evals/`:** symlinked run folders are ignored, run files are opened
+  without following symlinks, and cleanup never reaches through a link. A run whose
+  files can't be read safely (a symlink, broken JSON, an unknown status) raises
+  `RunCorrupt` when opened, and is left out of listings. One damaged run never hides
+  the others.
+- **Scores** are numbers or `None`. `NaN` and infinity are rejected: JSON can't hold
+  them, and a metric that couldn't be scored is stored as `None`.
+- `.evals/` is git-ignored. Runs contain questions, answers and passages from the PDFs.
 
 ## Choosing models for SDG and judging
 

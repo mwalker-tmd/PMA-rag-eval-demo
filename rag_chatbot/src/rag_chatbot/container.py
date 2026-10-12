@@ -10,6 +10,7 @@ from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 
 from rag_chatbot.adapters.datasets.file_repository import FileDatasetRepository
+from rag_chatbot.adapters.eval_runs.file_repository import FileEvalRunRepository
 from rag_chatbot.adapters.llm.fake_adapter import FakeLLMAdapter
 from rag_chatbot.adapters.llm.openai_adapter import OpenAILLMAdapter
 from rag_chatbot.adapters.sdg.fake_generator import FakeTestsetGenerator
@@ -19,6 +20,7 @@ from rag_chatbot.ingestion.indexer import IndexManager, Progress
 from rag_chatbot.pipelines.base import PipelineSpec
 from rag_chatbot.pipelines.registry import PIPELINES
 from rag_chatbot.ports.datasets import DatasetRepository
+from rag_chatbot.ports.eval_runs import EvalRunRepository
 from rag_chatbot.ports.llm import LLMPort
 from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.chat_service import ChatService
@@ -68,6 +70,7 @@ class Container:
     index: IndexManager
     datasets: DatasetRepository
     testset_generator: TestsetGeneratorPort
+    eval_runs: EvalRunRepository
     specs: dict[str, PipelineSpec] = field(default_factory=lambda: dict(PIPELINES))
     # One runner per container (the app caches one container per process), so jobs are shared and run one at a time.
     jobs: JobRunner = field(default_factory=JobRunner)
@@ -157,6 +160,7 @@ def build_container(
     embedding_dim: int | None = None,
     datasets: DatasetRepository | None = None,
     testset_generator: TestsetGeneratorPort | None = None,
+    eval_runs: EvalRunRepository | None = None,
 ) -> Container:
     settings = settings or load_settings()
     # Build config-checked adapters first: a config error then fails fast, before the embedded Qdrant lock is taken.
@@ -170,4 +174,5 @@ def build_container(
         index=index,
         datasets=datasets,
         testset_generator=testset_generator,
+        eval_runs=eval_runs or FileEvalRunRepository(settings.evals_dir),
     )

@@ -29,6 +29,7 @@ class Settings:
     data_dir: Path
     index_dir: Path
     datasets_dir: Path
+    evals_dir: Path = PROJECT_ROOT / ".evals"
     sdg_provider: str = DEFAULT_SDG_PROVIDER
     sdg_llm_model: str = DEFAULT_SDG_LLM_MODEL
     sdg_embedding_model: str = DEFAULT_SDG_EMBEDDING_MODEL
@@ -82,6 +83,7 @@ def load_settings() -> Settings:
         data_dir=_resolve(os.getenv("DATA_DIR", "../data")),
         index_dir=_resolve(os.getenv("INDEX_DIR", ".index")),
         datasets_dir=_resolve(os.getenv("DATASETS_DIR", ".datasets")),
+        evals_dir=_resolve(os.getenv("EVALS_DIR", ".evals")),
         sdg_provider=(os.getenv("SDG_PROVIDER") or DEFAULT_SDG_PROVIDER).strip().lower(),
         sdg_llm_model=(os.getenv("SDG_LLM_MODEL") or DEFAULT_SDG_LLM_MODEL).strip(),
         sdg_embedding_model=(os.getenv("SDG_EMBEDDING_MODEL") or DEFAULT_SDG_EMBEDDING_MODEL).strip(),
