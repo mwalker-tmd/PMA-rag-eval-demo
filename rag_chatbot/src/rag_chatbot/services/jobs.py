@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -80,6 +80,7 @@ class JobRunner:
         self._clock = clock
         self._thread_factory = thread_factory
         self._jobs: OrderedDict[JobId, JobStatus] = OrderedDict()  # oldest first
+        self._waiters: Counter[JobId] = Counter()  # jobs with a blocked wait(); never evicted from history
         self._changed = threading.Condition()
 
     def submit(self, kind: str, label: str, fn: JobFn) -> JobId:
@@ -129,8 +130,17 @@ class JobRunner:
         with self._changed:
             if job_id not in self._jobs:
                 raise JobNotFound(job_id)
-            self._changed.wait_for(lambda: not self._jobs[job_id].state.is_active, timeout=timeout)
-            return self._jobs[job_id]
+            # Pin the job while waiting: wait_for releases the lock, and without the pin a burst of
+            # new submits could evict the finished job from history before this waiter wakes up.
+            self._waiters[job_id] += 1
+            try:
+                self._changed.wait_for(lambda: not self._jobs[job_id].state.is_active, timeout=timeout)
+                return self._jobs[job_id]
+            finally:
+                self._waiters[job_id] -= 1
+                if not self._waiters[job_id]:
+                    del self._waiters[job_id]
+                self._trim_history_locked()  # catch up on anything the pin held back
 
     # --- worker ---
 
@@ -179,8 +189,17 @@ class JobRunner:
         return next((j for j in self._jobs.values() if j.state.is_active), None)
 
     def _trim_history_locked(self) -> None:
-        while len(self._jobs) > HISTORY_LIMIT:
-            oldest_id = next(iter(self._jobs))
-            if self._jobs[oldest_id].state.is_active:  # can't happen with one job at a time, but never drop a live job
-                break
-            del self._jobs[oldest_id]
+        """Drop the oldest jobs beyond HISTORY_LIMIT, skipping live jobs and jobs someone is waiting on.
+
+        History can briefly exceed the limit while such jobs are held; the next trim catches up.
+        """
+        excess = len(self._jobs) - HISTORY_LIMIT
+        if excess <= 0:
+            return
+        evictable = [
+            job_id
+            for job_id, job in self._jobs.items()  # oldest first
+            if not job.state.is_active and job_id not in self._waiters
+        ]
+        for job_id in evictable[:excess]:
+            del self._jobs[job_id]

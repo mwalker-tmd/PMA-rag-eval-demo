@@ -1,4 +1,5 @@
 import threading
+import time
 
 import pytest
 
@@ -149,6 +150,43 @@ def test_active_and_recent(runner):
     assert history[0].label == f"Job {HISTORY_LIMIT + 4}"  # newest first
     assert [j.created_at for j in history] == sorted((j.created_at for j in history), reverse=True)
     assert len(runner.recent()) == 20
+
+
+def test_a_blocked_waiter_survives_its_job_being_pushed_out_of_history(runner, monkeypatch):
+    """Regression: wait_for releases the lock, so a burst of submits could evict the finished job
+    before the waiter woke up, and the waiter's lookup raised KeyError."""
+    started, release = threading.Event(), threading.Event()
+    target = runner.submit("sdg", "Target", blocking_job(started, release, "target-result"))
+    assert started.wait(TIMEOUT)
+
+    burst_done = threading.Event()
+
+    def finish_target_then_burst():
+        release.set()
+        while runner.status(target).state.is_active:
+            time.sleep(0.001)
+        for i in range(HISTORY_LIMIT + 10):
+            runner.wait(runner.submit("sdg", f"Filler {i}", lambda report: None), timeout=TIMEOUT)
+        burst_done.set()
+        with runner._changed:
+            runner._changed.notify_all()
+
+    real_wait_for = runner._changed.wait_for
+    raced = []
+
+    def wait_for_while_others_run(predicate, timeout=None):
+        if raced:  # only the first waiter (the target's) gets the forced interleaving
+            return real_wait_for(predicate, timeout=timeout)
+        raced.append(True)
+        threading.Thread(target=finish_target_then_burst, daemon=True).start()
+        real_wait_for(burst_done.is_set, timeout=TIMEOUT)  # lock released while the burst runs
+        return predicate()
+
+    monkeypatch.setattr(runner._changed, "wait_for", wait_for_while_others_run)
+
+    status = runner.wait(target, timeout=TIMEOUT)
+    assert status.state is JobState.COMPLETED and status.result_id == "target-result"
+    assert len(runner.recent(limit=1000)) == HISTORY_LIMIT  # trimmed again once the waiter left
 
 
 def test_unknown_job_id_raises(runner):
