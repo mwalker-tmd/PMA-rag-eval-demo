@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from rag_chatbot.domain.models import ReasoningEffort
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+@dataclass(frozen=True)
+class Settings:
+    openai_api_key: str | None
+    cohere_api_key: str | None
+    llm_provider: str
+    llm_model: str
+    llm_reasoning_efforts: list[ReasoningEffort] | None  # None = let the adapter decide
+    default_reasoning_effort: ReasoningEffort | None
+    embedding_model: str
+    data_dir: Path
+    index_dir: Path
+
+
+def _resolve(path: str) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+
+
+def _parse_efforts(raw: str | None) -> list[ReasoningEffort] | None:
+    if raw is None or not raw.strip():
+        return None
+    if raw.strip().lower() == "unsupported":
+        return []
+    return [ReasoningEffort(v.strip().lower()) for v in raw.split(",") if v.strip()]
+
+
+def load_settings() -> Settings:
+    load_dotenv(PROJECT_ROOT / ".env")
+    default_effort = os.getenv("DEFAULT_REASONING_EFFORT", "medium").strip().lower()
+    return Settings(
+        openai_api_key=os.getenv("OPENAI_API_KEY") or None,
+        cohere_api_key=os.getenv("COHERE_API_KEY") or None,
+        llm_provider=os.getenv("LLM_PROVIDER", "openai").strip().lower(),
+        llm_model=os.getenv("LLM_MODEL", "").strip(),
+        llm_reasoning_efforts=_parse_efforts(os.getenv("LLM_REASONING_EFFORTS")),
+        default_reasoning_effort=ReasoningEffort(default_effort) if default_effort else None,
+        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        data_dir=_resolve(os.getenv("DATA_DIR", "../data")),
+        index_dir=_resolve(os.getenv("INDEX_DIR", ".index")),
+    )

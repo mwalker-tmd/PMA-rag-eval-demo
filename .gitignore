@@ -1,0 +1,6 @@
+# Keep the data/ folder in the repo, but never commit its contents
+data/*
+!data/.gitkeep
+
+# macOS Finder metadata, anywhere in the tree
+.DS_Store
