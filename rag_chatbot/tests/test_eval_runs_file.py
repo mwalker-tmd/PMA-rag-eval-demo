@@ -305,3 +305,108 @@ def test_progress_updates_leave_samples_alone(root, monkeypatch):
     repo.update_progress(m.run_id, 0.5, "halfway")
     repo.complete(m.run_id, make_sample_results(2), {}, judge_usage=None, answer_usage=None)
     assert len(repo.get(m.run_id).samples) == 2
+
+
+# ---------- containment and corrupt runs ----------
+
+
+@pytest.fixture
+def outside(tmp_path):
+    """A folder outside the store holding things a symlink could point at."""
+    d = tmp_path / "outside"
+    d.mkdir()
+    return d
+
+
+def _make_external_run(outside, root):
+    """A valid-looking run that lives outside the store."""
+    elsewhere = FileEvalRunRepository(outside / "other-store")
+    elsewhere.create(make_run_manifest())
+    return outside / "other-store" / "run_20261012-090000_baseline_ab12"
+
+
+def test_a_symlinked_run_folder_is_neither_listed_read_written_nor_cleaned(root, outside):
+    from rag_chatbot.domain.evals import RunAlreadyExists
+
+    target = _make_external_run(outside, root)
+    bait = target / ".manifest.json.tmp-not-yours"
+    bait.write_text("must survive")
+    before = (target / "manifest.json").read_text()
+    root.mkdir(parents=True)
+    (root / target.name).symlink_to(target, target_is_directory=True)
+
+    repo = FileEvalRunRepository(root)  # startup cleanup must not reach through the link
+    assert bait.exists()
+    assert repo.list() == []
+    with pytest.raises(RunNotFound):
+        repo.get(target.name)
+    with pytest.raises(RunNotFound):
+        repo.update_progress(target.name, 0.5, "through the link")
+    with pytest.raises(RunNotFound):
+        repo.fail(target.name, "through the link")
+    with pytest.raises(RunAlreadyExists):
+        repo.create(make_run_manifest(target.name))
+    assert (target / "manifest.json").read_text() == before  # nothing outside was modified
+
+
+def test_a_symlinked_manifest_is_refused(root, outside):
+    from rag_chatbot.domain.evals import RunCorrupt
+
+    secret = outside / "secret.json"
+    secret.write_text('{"not": "a run"}')
+    repo = FileEvalRunRepository(root)
+    folder = root / "run_linked"
+    folder.mkdir()
+    (folder / "manifest.json").symlink_to(secret)
+
+    assert repo.list() == []
+    with pytest.raises(RunCorrupt, match="symbolic link"):
+        repo.get("run_linked")
+    with pytest.raises(RunCorrupt):
+        repo.update_progress("run_linked", 0.1, "x")
+    assert secret.read_text() == '{"not": "a run"}'
+
+
+def test_a_symlinked_samples_file_is_refused(root, outside):
+    from rag_chatbot.domain.evals import RunCorrupt
+
+    secret = outside / "secret.jsonl"
+    secret.write_text('{"user_input": "leaked"}\n')
+    repo = FileEvalRunRepository(root)
+    m = make_run_manifest()
+    repo.create(m)
+    repo.complete(m.run_id, make_sample_results(1), {}, judge_usage=None, answer_usage=None)
+    samples = root / m.run_id / "samples.jsonl"
+    samples.unlink()
+    samples.symlink_to(secret)
+
+    with pytest.raises(RunCorrupt, match="symbolic link"):
+        repo.get(m.run_id)
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda d: {**d, "status": "paused"},  # not a RunStatus
+        lambda d: {k: v for k, v in d.items() if k != "testset_id"},  # missing field
+        lambda d: {**d, "started_at": "yesterday"},  # unparseable date
+        None,  # not JSON at all
+    ],
+    ids=["unknown-status", "missing-field", "bad-date", "not-json"],
+)
+def test_a_corrupt_manifest_is_skipped_by_list_and_reported_by_get(root, corrupt):
+    from rag_chatbot.domain.evals import RunCorrupt
+
+    repo = FileEvalRunRepository(root)
+    good, bad = make_run_manifest("run_good"), make_run_manifest("run_bad")
+    repo.create(good)
+    repo.create(bad)
+    path = root / "run_bad" / "manifest.json"
+    path.write_text("{ truncated" if corrupt is None else json.dumps(corrupt(json.loads(path.read_text()))))
+
+    assert [s.run_id for s in repo.list()] == ["run_good"]  # the good run is still listed
+    with pytest.raises(RunCorrupt, match="run_bad"):
+        repo.get("run_bad")
+    with pytest.raises(RunCorrupt):
+        repo.fail("run_bad", "x")
+    assert repo.get("run_good").manifest.status is RunStatus.RUNNING

@@ -196,6 +196,11 @@ Evaluation runs are saved under `EVALS_DIR` (default `.evals/`), one folder per 
 - **One writer at a time:** writes take a lock shared by every repository instance in
   the process, plus a file lock on `.evals/.lock` across processes. So two writers can
   never both finish the same run.
+- **Stays inside `.evals/`:** symlinked run folders are ignored, run files are opened
+  without following symlinks, and cleanup never reaches through a link. A run whose
+  files can't be read safely (a symlink, broken JSON, an unknown status) raises
+  `RunCorrupt` when opened, and is left out of listings. One damaged run never hides
+  the others.
 - **Scores** are numbers or `None`. `NaN` and infinity are rejected: JSON can't hold
   them, and a metric that couldn't be scored is stored as `None`.
 - `.evals/` is git-ignored. Runs contain questions, answers and passages from the PDFs.

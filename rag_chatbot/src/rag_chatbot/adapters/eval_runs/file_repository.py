@@ -17,11 +17,17 @@ lock shared by all instances on that folder, plus an exclusive file lock on `<ro
 "is this run already final?" check happens while both are held, so two writers can never both
 finish a run. Reads take no lock; they rely on the atomic replaces and only expose a run's
 samples once its manifest is final.
+
+Containment: nothing is followed out of the store. Symlinked run folders are treated as absent
+(skipped by list() and cleanup, RunNotFound otherwise), run files are opened with O_NOFOLLOW, and
+temp files are created with O_EXCL | O_NOFOLLOW. A run whose files can't be read safely raises
+RunCorrupt, and list() skips it instead of failing for every run.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import threading
@@ -46,6 +52,7 @@ from rag_chatbot.domain.evals import (
     EvalRunManifest,
     EvalRunSummary,
     RunAlreadyExists,
+    RunCorrupt,
     RunFinalized,
     RunNotFound,
     RunStatus,
@@ -64,6 +71,9 @@ TMP_MARKER = ".tmp-"
 LOCK_FILE = ".lock"
 LOCK_TIMEOUT_SECONDS = 30
 
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # POSIX; elsewhere the explicit symlink checks below still apply
+log = logging.getLogger(__name__)
+
 # One in-process lock per store folder, shared by every repository instance pointed at it.
 _ROOT_LOCKS: dict[Path, threading.Lock] = {}
 _ROOT_LOCKS_GUARD = threading.Lock()
@@ -81,11 +91,13 @@ class FileEvalRunRepository:
         self._lock = _root_lock(self.root)
         self._clock = clock
         with self._writing():  # wait for in-flight writes; never delete another writer's temp files
-            for leftover in self.root.glob(f"*/.*{TMP_MARKER}*"):
-                leftover.unlink(missing_ok=True)
-            for folder in self.root.iterdir():
+            for folder in self._run_folders():  # real folders only: never reach through a symlink
                 if _is_abandoned(folder):
                     shutil.rmtree(folder, ignore_errors=True)
+                    continue
+                for entry in folder.iterdir():
+                    if entry.name.startswith(".") and TMP_MARKER in entry.name:
+                        entry.unlink(missing_ok=True)  # removes a symlink itself, never its target
 
     def create(self, manifest: EvalRunManifest) -> None:
         validate_new_run(manifest)
@@ -146,9 +158,12 @@ class FileEvalRunRepository:
         # Samples are written before the manifest commits the run, so only trust them once it's final;
         # until then they may belong to a complete()/fail() that's still in progress or crashed.
         samples_path = folder / SAMPLES
-        if manifest.is_final and samples_path.exists():
-            with samples_path.open(encoding="utf-8") as f:
-                samples = [sample_from_dict(json.loads(line)) for line in f if line.strip()]
+        if manifest.is_final and os.path.lexists(samples_path):
+            try:
+                text = _read_text(samples_path)
+                samples = [sample_from_dict(json.loads(line)) for line in text.splitlines() if line.strip()]
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                raise RunCorrupt(f"{run_id}: can't read samples ({type(e).__name__}: {e})") from e
         return EvalRun(manifest=manifest, samples=samples)
 
     def list(
@@ -159,11 +174,14 @@ class FileEvalRunRepository:
         batch_id: str | None = None,
         status: RunStatus | None = None,
     ) -> list[EvalRunSummary]:
-        summaries = [
-            EvalRunSummary.from_manifest(self._read_manifest(folder))
-            for folder in self.root.iterdir()
-            if folder.is_dir() and not folder.name.startswith(".") and (folder / MANIFEST).exists()
-        ]
+        summaries = []
+        for folder in self._run_folders():
+            if not os.path.lexists(folder / MANIFEST):
+                continue  # still being created, or abandoned
+            try:
+                summaries.append(EvalRunSummary.from_manifest(self._read_manifest(folder)))
+            except RunCorrupt as e:  # one unreadable run mustn't hide all the others
+                log.warning("Skipping unreadable evaluation run: %s", e)
         return sort_newest_first(
             [s for s in summaries if matches(s, testset_id=testset_id, pipeline=pipeline, batch_id=batch_id, status=status)]
         )
@@ -192,36 +210,63 @@ class FileEvalRunRepository:
                 (folder / SAMPLES).unlink(missing_ok=True)
             self._write_manifest(folder, change(manifest))  # last: the manifest's status commits the change
 
+    def _run_folders(self) -> Iterator[Path]:
+        """Run-shaped entries that are real folders inside the store (symlinks and dot-entries excluded)."""
+        for entry in self.root.iterdir():
+            if _is_run_folder(entry):
+                yield entry
+
     def _folder(self, run_id: str) -> Path:
+        if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
+            raise RunNotFound(run_id)
         folder = self.root / run_id
-        if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id) or not (folder / MANIFEST).exists():
+        if not _is_run_folder(folder) or not os.path.lexists(folder / MANIFEST):
             raise RunNotFound(run_id)
         return folder
 
     @staticmethod
     def _read_manifest(folder: Path) -> EvalRunManifest:
-        return manifest_from_dict(json.loads((folder / MANIFEST).read_text(encoding="utf-8")))
+        try:
+            return manifest_from_dict(json.loads(_read_text(folder / MANIFEST)))
+        except FileNotFoundError:
+            raise RunNotFound(folder.name) from None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # incl. an unknown status
+            raise RunCorrupt(f"{folder.name}: unreadable manifest ({type(e).__name__}: {e})") from e
 
     @staticmethod
     def _write_manifest(folder: Path, manifest: EvalRunManifest) -> None:
         _atomic_write(folder / MANIFEST, json.dumps(manifest_to_dict(manifest), indent=2, ensure_ascii=False))
 
 
+def _is_run_folder(path: Path) -> bool:
+    return (
+        RUN_ID_PATTERN.fullmatch(path.name) is not None
+        and not path.is_symlink()  # never follow a link out of the store
+        and path.is_dir()
+    )
+
+
 def _is_abandoned(folder: Path) -> bool:
     """A run folder whose create() was interrupted before its manifest was written."""
-    return (
-        folder.is_dir()
-        and not folder.name.startswith(".")
-        and RUN_ID_PATTERN.fullmatch(folder.name) is not None
-        and not (folder / MANIFEST).exists()
-    )
+    return _is_run_folder(folder) and not os.path.lexists(folder / MANIFEST)
+
+
+def _read_text(path: Path) -> str:
+    """Read a run file without following a symlink (raises OSError if it is one)."""
+    if path.is_symlink():
+        raise OSError(f"{path.name} is a symbolic link")
+    fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+    with os.fdopen(fd, encoding="utf-8") as f:
+        return f.read()
 
 
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}{TMP_MARKER}{uuid.uuid4().hex}")
     try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644)  # a fresh file, never a link
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)  # replaces the name; a symlink at `path` is replaced, not followed
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

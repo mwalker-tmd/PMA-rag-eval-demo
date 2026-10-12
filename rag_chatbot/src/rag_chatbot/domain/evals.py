@@ -28,6 +28,10 @@ class RunFinalized(Exception):
     """The run is COMPLETED or FAILED; it can't be changed any more."""
 
 
+class RunCorrupt(Exception):
+    """A stored run can't be read safely: unreadable or invalid data, or a file that isn't a regular file."""
+
+
 class RunStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
