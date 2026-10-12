@@ -46,7 +46,7 @@ def cli(monkeypatch, tmp_path, data_dir):
 
 def test_cli_runs_every_pipeline_and_prints_a_comparison_table(cli, capsys):
     main, testset_id, tmp_path = cli
-    assert main(["--testset", testset_id]) == 0
+    assert main(["--testset", testset_id, "--yes"]) == 0
     out = capsys.readouterr().out
     table = out[out.index("metric"):]
     header = table.splitlines()[0].split()
@@ -59,21 +59,21 @@ def test_cli_runs_every_pipeline_and_prints_a_comparison_table(cli, capsys):
 def test_cli_prints_the_judge_warning_when_the_models_match(cli, capsys, monkeypatch):
     main, testset_id, _ = cli
     monkeypatch.setenv("EVAL_JUDGE_MODEL", "fake-model")
-    assert main(["--testset", testset_id, "--pipelines", "baseline"]) == 0
+    assert main(["--testset", testset_id, "--pipelines", "baseline", "--yes"]) == 0
     assert "Warning: The judge model (fake-model) is the same as the answering model" in capsys.readouterr().out
 
 
 def test_cli_reference_option_and_unknown_testset(cli, capsys):
     main, testset_id, _ = cli
-    assert main(["--testset", testset_id, "--reference", "parent_child"]) == 0
+    assert main(["--testset", testset_id, "--reference", "parent_child", "--yes"]) == 0
     assert "Δ is relative to parent_child" in capsys.readouterr().out
-    assert main(["--testset", "ts_20260101_deadbeef"]) == 1
+    assert main(["--testset", "ts_20260101_deadbeef", "--yes"]) == 1
     assert "ts_20260101_deadbeef" in capsys.readouterr().err
 
 
 def test_cli_refuses_an_unavailable_pipeline(cli, capsys):
     main, testset_id, _ = cli
-    assert main(["--testset", testset_id, "--pipelines", "rerank"]) == 1
+    assert main(["--testset", testset_id, "--pipelines", "rerank", "--yes"]) == 1
     assert "COHERE_API_KEY" in capsys.readouterr().err
 
 
@@ -82,7 +82,7 @@ def test_cli_explains_when_the_app_holds_the_index(cli, capsys):
     (tmp_path / "index").mkdir(exist_ok=True)
     holder = QdrantClient(path=str(tmp_path / "index" / "qdrant"))  # the running app
     try:
-        assert main(["--testset", testset_id]) == 1
+        assert main(["--testset", testset_id, "--yes"]) == 1
         assert "already accessed" in capsys.readouterr().err
     finally:
         holder.close()
@@ -96,7 +96,7 @@ def test_cli_prints_the_stale_test_set_warning(cli, capsys, data_dir):
     doc = pymupdf.open()
     doc.new_page().insert_text((72, 72), "Changed corpus.")
     doc.save(str(data_dir / "changed.pdf"))
-    assert main(["--testset", testset_id, "--pipelines", "baseline"]) == 0
+    assert main(["--testset", testset_id, "--pipelines", "baseline", "--yes"]) == 0
     out = capsys.readouterr().out
     assert "Warning: Test set core-corpus v1 is stale" in out
     assert out.count("same as the answering model") == 0
@@ -107,12 +107,35 @@ def test_cli_reports_a_missing_corpus_instead_of_a_traceback(cli, capsys, data_d
 
     main, testset_id, _ = cli
     shutil.rmtree(data_dir)
-    assert main(["--testset", testset_id]) == 1
+    assert main(["--testset", testset_id, "--yes"]) == 1
     assert "No PDFs found" in capsys.readouterr().err
 
 
 def test_cli_prints_the_judge_warning_once(cli, capsys, monkeypatch):
     main, testset_id, _ = cli
     monkeypatch.setenv("EVAL_JUDGE_MODEL", "fake-model")
-    assert main(["--testset", testset_id, "--pipelines", "baseline"]) == 0
+    assert main(["--testset", testset_id, "--pipelines", "baseline", "--yes"]) == 0
     assert capsys.readouterr().out.count("same as the answering model") == 1
+
+
+
+def test_cli_shows_the_estimate_and_cancelling_creates_nothing(cli, capsys, monkeypatch):
+    main, testset_id, tmp_path = cli
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    assert main(["--testset", testset_id]) == 0
+    out = capsys.readouterr().out
+    assert "Questions: 2 × 2 pipeline(s)" in out
+    assert "Answering (fake-model)" in out and "Judging (fake-judge)" in out
+    assert "cost unknown (set LLM_PRICE_*" in out and "cost unknown (set EVAL_JUDGE_PRICE_*" in out
+    assert "Cancelled." in out
+    assert not list((tmp_path / "evals").glob("run_*"))
+
+
+def test_cli_yes_skips_the_prompt(cli, monkeypatch):
+    main, testset_id, _ = cli
+
+    def no_prompt(_prompt):
+        raise AssertionError("--yes must not prompt")
+
+    monkeypatch.setattr("builtins.input", no_prompt)
+    assert main(["--testset", testset_id, "--pipelines", "baseline", "--yes"]) == 0

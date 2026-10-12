@@ -32,15 +32,16 @@ embedding model or a pipeline setting changes. Use `ingest.py --force` or the
 
 ## Pages
 
-`app.py` is the entry point. It sets up `st.navigation` with two pages:
+`app.py` is the entry point. It sets up `st.navigation` with three pages:
 
 | Page | File | What it does |
 |---|---|---|
 | **Chat** | `src/rag_chatbot/ui/chat_page.py` | Ask one pipeline, or compare all three side by side. The first visit builds the vector index if needed. |
 | **Test Sets** | `src/rag_chatbot/ui/test_sets_page.py` | Generate synthetic test sets with an estimate and confirmation step, watch progress, and browse saved test sets. Never builds the vector index. |
+| **Evaluations** | `src/rag_chatbot/ui/evaluations_page.py` | Estimate and run evaluations of one or more pipelines against a test set, watch progress, then filter, compare (with Δ against a reference run) and inspect runs. |
 
-Both pages share one cached container (`ui/state.py`), so a generation started on one
-page or tab is visible in all of them.
+All pages share one cached container (`ui/state.py`), so a job started on one page or
+tab is visible in all of them. Only one job runs at a time.
 
 ## Architecture (Ports and Adapters)
 
@@ -177,6 +178,23 @@ per test set:
 
 ## Running evaluations
 
+**In the app:** open **Evaluations**, then:
+1. Choose a test set, the pipelines and a reasoning effort.
+2. Click **Estimate**. It shows how many answers will be generated, plus answering and
+   judging tokens, each with a cost when that model's prices are set
+   (`LLM_PRICE_*` and `EVAL_JUDGE_PRICE_*`).
+3. Click **Confirm and run**. Changing any input after estimating means you need a new
+   estimate.
+4. When the run finishes, its batch is selected for comparison. The comparison table
+   shows metrics as rows and one column per run, with a Δ column per run against the
+   reference run (green is better, red is worse, except for
+   `noise_sensitivity_relevant`, where lower is better).
+5. Pick any runs to compare with **Runs to compare**, or a whole batch with **Select
+   batch**, and filter the runs table by test set, pipeline or status.
+
+Judging dominates the cost. For 10 questions across 3 pipelines, the estimate is about
+621k judging tokens, versus about 27k for answering.
+
 An evaluation answers every question in a saved test set with one or more pipelines
 (using `LLM_MODEL`), scores the answers with the judge (`EVAL_JUDGE_MODEL`), and saves
 one run per pipeline. Runs started together share a batch.
@@ -185,14 +203,17 @@ one run per pipeline. Runs started together share a batch.
 uv run python scripts/run_eval.py --testset <testset_id>                       # all available pipelines
 uv run python scripts/run_eval.py --testset <testset_id> --pipelines baseline,parent_child --effort low
 uv run python scripts/run_eval.py --testset <testset_id> --reference parent_child
+uv run python scripts/run_eval.py --testset <testset_id> --yes                 # skip the confirmation
 ```
+
+The CLI prints the same estimate as the app (with any warnings) and asks
+`Proceed? [y/N]` before running anything.
 
 **Stop the app first.** Evaluating needs the vector index, and the embedded index allows
 one process at a time. If the app is running, the CLI exits with an "already accessed"
 error and touches nothing.
 
-The CLI prints any warnings (for example, a judge that's the same model as `LLM_MODEL`,
-or a stale test set), shows progress, and ends with a comparison table: metrics as rows,
+After confirming, the CLI shows progress and ends with a comparison table: metrics as rows,
 one column per pipeline, and a Δ column against `--reference` (default: the first
 pipeline). It exits with 0 when every run completed, 2 when some failed, and 1 on errors.
 
