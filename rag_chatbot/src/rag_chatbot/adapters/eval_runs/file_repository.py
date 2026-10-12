@@ -176,7 +176,9 @@ class FileEvalRunRepository:
         if manifest.is_final and os.path.lexists(samples_path):
             try:
                 text = _read_text(samples_path)
-                samples = [sample_from_dict(json.loads(line)) for line in text.splitlines() if line.strip()]
+                # Split on "\n" only: str.splitlines() also splits on \u2028, \u2029 and \x85, which JSON leaves
+                # unescaped inside strings (ensure_ascii=False) and which real PDF text contains.
+                samples = [sample_from_dict(json.loads(line)) for line in text.split("\n") if line.strip()]
             except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
                 raise RunCorrupt(f"{run_id}: can't read samples ({type(e).__name__}: {e})") from e
         return EvalRun(manifest=manifest, samples=samples)

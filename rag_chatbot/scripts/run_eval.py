@@ -2,6 +2,9 @@
 
     uv run python scripts/run_eval.py --testset ts_20261012_ab12cd34
     uv run python scripts/run_eval.py --testset ts_20261012_ab12cd34 --pipelines baseline,rerank --effort low
+    uv run python scripts/run_eval.py --testset ts_20261012_ab12cd34 --yes   # skip the confirmation
+
+Shows a token/cost estimate (answering and judging) and asks for confirmation first.
 
 Answers every question with each pipeline (LLM_MODEL), scores the answers with the judge
 (EVAL_JUDGE_MODEL), saves one run per pipeline under EVALS_DIR, and prints the metrics side by
@@ -21,6 +24,7 @@ from rag_chatbot.domain.models import ReasoningEffort
 from rag_chatbot.services.evaluation_service import (
     PipelineUnavailable,
     RunComparison,
+    EvaluationEstimate,
     StartEvaluationRequest,
 )
 from rag_chatbot.services.sdg_service import InvalidRequest
@@ -32,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pipelines", default="all", help="comma-separated pipeline names, or 'all' (default)")
     parser.add_argument("--effort", choices=[e.value for e in ReasoningEffort], help="reasoning effort for LLM_MODEL")
     parser.add_argument("--reference", metavar="PIPELINE", help="pipeline to compare against (default: the first)")
+    parser.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     args = parser.parse_args(argv)
 
     pipelines = () if args.pipelines.strip().lower() == "all" else tuple(p.strip() for p in args.pipelines.split(",") if p.strip())
@@ -53,13 +58,22 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _evaluate(service, request: StartEvaluationRequest, args) -> int:
-    # Warnings (judge == answering model, stale test set) are printed via on_warning before answering starts.
+    try:
+        estimate = service.estimate_evaluation(request)
+    except (InvalidRequest, TestsetNotFound, PipelineUnavailable, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    print(format_estimate(estimate))  # includes the warnings (judge == answering model, stale test set)
+    if not args.yes and input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("Cancelled.")
+        return 0
+
     def report(progress, message):
         pct = f"{progress:4.0%}" if progress is not None else "  … "
         print(f"[{pct}] {message}", flush=True)
 
     try:
-        runs = service.run_evaluation(request, report, on_warning=lambda w: print(f"Warning: {w}"))
+        runs = service.run_evaluation(request, report)  # warnings were shown with the estimate
     except (InvalidRequest, TestsetNotFound, PipelineUnavailable, ModelIncompatible, EvaluationError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -80,6 +94,23 @@ def _evaluate(service, request: StartEvaluationRequest, args) -> int:
     print()
     print(format_comparison(service.compare_runs([r.run_id for r in runs], reference), {r.run_id: r.pipeline for r in runs}))
     return 0 if not failed else 2
+
+
+def format_estimate(e: EvaluationEstimate) -> str:
+    def cost(value: float | None, env: str) -> str:
+        return f"~${value:,.2f}" if value is not None else f"cost unknown (set {env}_PRICE_* to show it)"
+
+    lines = [f"Warning: {w}" for w in e.warnings]
+    lines += [
+        f"Questions: {e.questions} × {len(e.pipelines)} pipeline(s) ({', '.join(e.pipelines)})",
+        f"Answering ({e.answer_model}): ~{e.est_answer_input_tokens:,} input + ~{e.est_answer_output_tokens:,} "
+        f"output tokens, {cost(e.est_answer_cost_usd, 'LLM')}",
+        f"Judging ({e.judge_model}):  ~{e.est_judge_input_tokens:,} input + ~{e.est_judge_output_tokens:,} "
+        f"output tokens, {cost(e.est_judge_cost_usd, 'EVAL_JUDGE')}",
+    ]
+    if e.calibrated:
+        lines.append("(calibrated from past runs)")
+    return "\n".join(lines)
 
 
 def format_comparison(c: RunComparison, names: dict[str, str]) -> str:

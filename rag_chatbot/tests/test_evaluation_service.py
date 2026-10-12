@@ -516,3 +516,106 @@ def test_a_judge_failure_keeps_the_answering_usage(make_env):
     m = container.eval_runs.get(started.run_ids[0]).manifest
     assert m.status is RunStatus.FAILED
     assert m.answer_usage is not None and m.answer_usage.total_tokens > 0
+
+
+# ---------- estimate_evaluation (#10) ----------
+
+
+from rag_chatbot.services.evaluation_service import (  # noqa: E402
+    ANSWER_INPUT_TOKENS,
+    ANSWER_OUTPUT_TOKENS,
+    JUDGE_INPUT_TOKENS,
+    JUDGE_OUTPUT_TOKENS,
+)
+
+
+def test_estimate_creates_nothing_and_calls_no_model(make_env):
+    llm, evaluator = FakeLLMAdapter(), FakeEvaluator()
+    container, testset_id = make_env(llm=llm, evaluator=evaluator, size=3)
+    est = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id))
+    assert container.eval_runs.list() == []
+    assert llm.requests == [] and evaluator.calls == []
+    assert container.jobs.recent() == []
+    assert (est.questions, est.pipelines) == (3, ["baseline", "parent_child"])
+    assert (est.answer_model, est.judge_model) == ("fake-model", "fake-judge")
+    assert est.calibrated is False
+
+
+def test_estimate_scales_with_questions_times_pipelines(make_env):
+    container, testset_id = make_env(size=4, with_rerank=True)
+    one = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+    three = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id))
+    assert (one.est_answer_input_tokens, one.est_judge_input_tokens) == (4 * ANSWER_INPUT_TOKENS, 4 * JUDGE_INPUT_TOKENS)
+    assert (one.est_answer_output_tokens, one.est_judge_output_tokens) == (4 * ANSWER_OUTPUT_TOKENS, 4 * JUDGE_OUTPUT_TOKENS)
+    assert three.est_judge_input_tokens == 3 * one.est_judge_input_tokens
+
+
+def test_estimate_costs_appear_only_for_priced_models(make_env):
+    container, testset_id = make_env(llm_price_input_per_mtok=2.0, llm_price_output_per_mtok=8.0)
+    est = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+    assert est.est_answer_cost_usd == pytest.approx(est.est_answer_input_tokens / 1e6 * 2.0 + est.est_answer_output_tokens / 1e6 * 8.0, abs=1e-4)
+    assert est.est_judge_cost_usd is None  # EVAL_JUDGE_PRICE_* unset
+
+    container, testset_id = make_env(eval_judge_price_input_per_mtok=0.4, eval_judge_price_output_per_mtok=1.6)
+    est = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+    assert est.est_answer_cost_usd is None
+    assert est.est_judge_cost_usd == pytest.approx(est.est_judge_input_tokens / 1e6 * 0.4 + est.est_judge_output_tokens / 1e6 * 1.6, abs=1e-4)
+
+
+def test_estimate_is_calibrated_from_matching_completed_runs(make_env):
+    container, testset_id = make_env(size=3)
+    started, _ = run_batch(container, testset_id, pipelines=("baseline",))
+    done = container.eval_runs.get(started.run_ids[0])
+    est = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+    assert est.calibrated is True
+    # For the same questions and pipelines, the calibrated estimate is what that run actually used.
+    assert est.est_answer_input_tokens == done.manifest.answer_usage.input_tokens
+    assert est.est_answer_output_tokens == done.manifest.answer_usage.output_tokens
+    assert est.est_judge_input_tokens == done.manifest.judge_usage.input_tokens
+    assert est.est_judge_output_tokens == done.manifest.judge_usage.output_tokens
+
+
+def test_estimate_ignores_runs_with_other_models(make_env):
+    container, testset_id = make_env(size=2)
+    _completed(container, "run_other", "baseline", testset_id, {"faithfulness": 0.5})  # answer model gpt-5-mini
+    est = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+    assert est.calibrated is False
+
+
+@pytest.mark.parametrize(
+    "request_kwargs, error",
+    [
+        ({"testset_id": "ts_20260101_deadbeef"}, TestsetNotFound),
+        ({"pipelines": ("rerank",)}, PipelineUnavailable),
+        ({"pipelines": ("nonexistent",)}, InvalidRequest),
+        ({"reasoning_effort": ReasoningEffort.XHIGH}, InvalidRequest),
+    ],
+    ids=["unknown-testset", "unavailable", "unknown-pipeline", "unsupported-effort"],
+)
+def test_estimate_raises_what_start_would(make_env, request_kwargs, error):
+    container, testset_id = make_env()
+    req = StartEvaluationRequest(**{"testset_id": testset_id, **request_kwargs})
+    with pytest.raises(error):
+        container.evaluation.estimate_evaluation(req)
+    with pytest.raises(error):
+        container.evaluation.start_evaluation(req)
+
+
+def test_estimate_carries_the_start_warnings(make_env, data_dir):
+    container, testset_id = make_env(eval_judge_model="fake-model")
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Changed corpus.")
+    doc.save(str(data_dir / "changed.pdf"))
+    est = container.evaluation.estimate_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+    assert any("stale" in w for w in est.warnings) and any("same as the answering model" in w for w in est.warnings)
+
+
+@pytest.mark.parametrize("var", ["LLM_PRICE_INPUT_PER_MTOK", "EVAL_JUDGE_PRICE_OUTPUT_PER_MTOK"])
+@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "cheap"])
+def test_invalid_evaluation_prices_are_rejected(monkeypatch, var, raw):
+    from rag_chatbot.config import load_settings
+
+    monkeypatch.setattr("rag_chatbot.config.load_dotenv", lambda *_a, **_k: None)
+    monkeypatch.setenv(var, raw)
+    with pytest.raises(ValueError, match=var):
+        load_settings()

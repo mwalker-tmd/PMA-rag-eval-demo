@@ -42,6 +42,14 @@ from rag_chatbot.services.sdg_service import InvalidRequest
 
 INTERRUPTED = "Interrupted (server restarted)"
 
+# Base estimate, per question per pipeline. Rough on purpose: calibration against past completed runs
+# with the same answer and judge models replaces them once any exist. Judge figures were measured in
+# PR #20's live run (gpt-4.1-mini scoring all six metrics: ~17k input / ~3.7k output tokens per answer).
+ANSWER_INPUT_TOKENS = 600
+ANSWER_OUTPUT_TOKENS = 300
+JUDGE_INPUT_TOKENS = 17_000
+JUDGE_OUTPUT_TOKENS = 3_700
+
 
 class PipelineUnavailable(Exception):
     """A requested pipeline can't run in this configuration (e.g. Rerank without COHERE_API_KEY)."""
@@ -60,6 +68,31 @@ class StartedEvaluation:
     batch_id: str
     run_ids: list[str]  # one per pipeline, already saved as RUNNING
     warnings: list[str]  # e.g. stale test set, judge == answer model
+
+
+@dataclass(frozen=True)
+class EvaluationEstimate:
+    questions: int  # samples in the test set
+    pipelines: list[str]  # what will run (resolved like start_evaluation)
+    answer_model: str  # LLM_MODEL
+    judge_model: str  # EVAL_JUDGE_MODEL
+    est_answer_input_tokens: int
+    est_answer_output_tokens: int
+    est_judge_input_tokens: int
+    est_judge_output_tokens: int
+    est_answer_cost_usd: float | None  # None unless LLM_PRICE_* are both set
+    est_judge_cost_usd: float | None  # None unless EVAL_JUDGE_PRICE_* are both set
+    calibrated: bool  # True if per-answer usage came from past completed runs
+    warnings: list[str]  # same as start_evaluation would report
+
+
+@dataclass(frozen=True)
+class _Validated:
+    testset: Testset
+    pipelines: list[str]
+    effort: ReasoningEffort | None
+    evaluator: EvaluatorPort
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -157,6 +190,29 @@ class EvaluationService:
                 "set EVAL_JUDGE_MODEL to a different model."
             )
         return warnings
+
+    def estimate_evaluation(self, req: StartEvaluationRequest) -> EvaluationEstimate:
+        """Token and cost estimate for a request. Validates like start_evaluation; creates nothing, calls no model."""
+        v = self._validate(req)
+        runs = len(v.testset.samples) * len(v.pipelines)
+        rates = self._calibrated_rates(self._llm.model, v.evaluator.judge_model)
+        a_in, a_out, j_in, j_out = rates or (ANSWER_INPUT_TOKENS, ANSWER_OUTPUT_TOKENS, JUDGE_INPUT_TOKENS, JUDGE_OUTPUT_TOKENS)
+        est = [round(runs * rate) for rate in (a_in, a_out, j_in, j_out)]
+        s = self._settings
+        return EvaluationEstimate(
+            questions=len(v.testset.samples),
+            pipelines=v.pipelines,
+            answer_model=self._llm.model,
+            judge_model=v.evaluator.judge_model,
+            est_answer_input_tokens=est[0],
+            est_answer_output_tokens=est[1],
+            est_judge_input_tokens=est[2],
+            est_judge_output_tokens=est[3],
+            est_answer_cost_usd=_cost(est[0], est[1], s.llm_price_input_per_mtok, s.llm_price_output_per_mtok),
+            est_judge_cost_usd=_cost(est[2], est[3], s.eval_judge_price_input_per_mtok, s.eval_judge_price_output_per_mtok),
+            calibrated=rates is not None,
+            warnings=v.warnings,
+        )
 
     def start_evaluation(self, req: StartEvaluationRequest) -> StartedEvaluation:
         if (active := self._jobs.active()) is not None:  # before creating any runs
@@ -266,6 +322,13 @@ class EvaluationService:
 
     def _prepare(self, req: StartEvaluationRequest) -> _Batch:
         """Validate the request and create one RUNNING run per pipeline."""
+        v = self._validate(req)
+        testset, pipelines, effort, evaluator, warnings = v.testset, v.pipelines, v.effort, v.evaluator, v.warnings
+        started_at = self._clock()
+        return self._create_runs(started_at, testset, pipelines, effort, evaluator, warnings)
+
+    def _validate(self, req: StartEvaluationRequest) -> _Validated:
+        """Everything start_evaluation and estimate_evaluation check, in one place, so they always agree."""
         testset = self._datasets.get(req.testset_id)  # TestsetNotFound
         if not testset.samples:
             raise InvalidRequest(f"Test set {req.testset_id} has no questions.")
@@ -287,8 +350,9 @@ class EvaluationService:
                 f"Test set {_testset_label(testset)} is stale: the PDFs in data/ have changed since it was made, "
                 "so its questions may not match the current corpus."
             )
+        return _Validated(testset, pipelines, effort, evaluator, warnings)
 
-        started_at = self._clock()
+    def _create_runs(self, started_at, testset, pipelines, effort, evaluator, warnings) -> _Batch:
         batch_id = new_batch_id(started_at)
         index_digest = self._index_digest()
         run_ids: dict[str, str] = {}
@@ -438,6 +502,35 @@ class EvaluationService:
 
     def _corpus_digest(self) -> str:
         return corpus_fingerprint(Path(self._settings.data_dir)).digest
+
+
+    def _calibrated_rates(self, answer_model: str, judge_model: str) -> tuple[float, float, float, float] | None:
+        """Average (answer in, answer out, judge in, judge out) tokens per question over past completed runs
+        with the same answer and judge models, or None if there are none with recorded usage."""
+        totals, answered, judged = [0, 0, 0, 0], 0, 0
+        for s in self._runs.list(status=RunStatus.COMPLETED):
+            if s.answer_model != answer_model or s.judge_model != judge_model:
+                continue
+            run = self._runs.get(s.run_id)
+            m, n = run.manifest, len(run.samples)
+            scored = sum(1 for r in run.samples if r.response)
+            if m.answer_usage and n:
+                totals[0] += m.answer_usage.input_tokens
+                totals[1] += m.answer_usage.output_tokens
+                answered += n
+            if m.judge_usage and scored:
+                totals[2] += m.judge_usage.input_tokens
+                totals[3] += m.judge_usage.output_tokens
+                judged += scored
+        if not answered or not judged:
+            return None
+        return totals[0] / answered, totals[1] / answered, totals[2] / judged, totals[3] / judged
+
+
+def _cost(tokens_in: int, tokens_out: int, price_in: float | None, price_out: float | None) -> float | None:
+    if price_in is None or price_out is None:
+        return None
+    return round(tokens_in / 1e6 * price_in + tokens_out / 1e6 * price_out, 4)
 
 
 def _testset_label(testset: Testset) -> str:

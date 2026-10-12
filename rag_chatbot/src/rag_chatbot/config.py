@@ -54,6 +54,10 @@ class Settings:
     eval_timeout_seconds: int = DEFAULT_EVAL_TIMEOUT_SECONDS
     eval_row_delay_seconds: float = DEFAULT_EVAL_ROW_DELAY_SECONDS
     embedding_provider: str = "openai"  # openai | fake (tests only: deterministic, offline)
+    llm_price_input_per_mtok: float | None = None  # USD per 1M tokens for LLM_MODEL (evaluation estimates)
+    llm_price_output_per_mtok: float | None = None
+    eval_judge_price_input_per_mtok: float | None = None  # USD per 1M tokens for EVAL_JUDGE_MODEL
+    eval_judge_price_output_per_mtok: float | None = None
 
 
 def _resolve(path: str) -> Path:
@@ -142,4 +146,8 @@ def load_settings() -> Settings:
         eval_timeout_seconds=_positive_int("EVAL_TIMEOUT_SECONDS", DEFAULT_EVAL_TIMEOUT_SECONDS),
         eval_row_delay_seconds=_non_negative_float("EVAL_ROW_DELAY_SECONDS", DEFAULT_EVAL_ROW_DELAY_SECONDS),
         embedding_provider=(os.getenv("EMBEDDING_PROVIDER") or "openai").strip().lower(),
+        llm_price_input_per_mtok=_optional_float("LLM_PRICE_INPUT_PER_MTOK"),
+        llm_price_output_per_mtok=_optional_float("LLM_PRICE_OUTPUT_PER_MTOK"),
+        eval_judge_price_input_per_mtok=_optional_float("EVAL_JUDGE_PRICE_INPUT_PER_MTOK"),
+        eval_judge_price_output_per_mtok=_optional_float("EVAL_JUDGE_PRICE_OUTPUT_PER_MTOK"),
     )

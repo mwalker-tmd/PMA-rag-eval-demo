@@ -410,3 +410,19 @@ def test_a_corrupt_manifest_is_skipped_by_list_and_reported_by_get(root, corrupt
     with pytest.raises(RunCorrupt):
         repo.fail("run_bad", "x")
     assert repo.get("run_good").manifest.status is RunStatus.RUNNING
+
+
+def test_samples_with_unicode_line_separators_round_trip(root):
+    """Regression: PDF text can contain \\u2028, \\u2029 and \\x85, which JSON leaves unescaped in strings.
+    Reading the samples file with str.splitlines() split those lines apart and made the run unreadable."""
+    from dataclasses import replace as dc_replace
+
+    repo = FileEvalRunRepository(root)
+    m = make_run_manifest()
+    repo.create(m)
+    tricky = "line one line two paragraph\x85next line\x0cform feed"
+    samples = [dc_replace(s, response=tricky, retrieved_contexts=[tricky]) for s in make_sample_results(2)]
+    repo.complete(m.run_id, samples, {}, judge_usage=None, answer_usage=None)
+    got = FileEvalRunRepository(root).get(m.run_id).samples
+    assert got == samples
+    assert got[0].response == tricky
