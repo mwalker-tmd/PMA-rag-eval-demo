@@ -359,3 +359,48 @@ def test_batch_selections_put_the_baseline_first_as_the_reference(make_app):
     pipelines = [container.eval_runs.get(r).manifest.pipeline for r in selected]
     assert pipelines == ["baseline", "rerank", "parent_child"]
     assert at.selectbox(key="eval_reference").value == selected[0]
+
+
+# ---------- review regression (PR #22) ----------
+
+
+@pytest.fixture
+def app_reruns(monkeypatch):
+    """Record whole-app reruns requested by the page (AppTest's own full runs would hide a missing one)."""
+    import streamlit
+
+    calls = []
+    real_rerun = streamlit.rerun
+
+    def recording_rerun(*args, scope="app", **kwargs):
+        calls.append(scope)
+        return real_rerun(*args, scope=scope, **kwargs)
+
+    monkeypatch.setattr(streamlit, "rerun", recording_rerun)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "page, other_kind, form_key",
+    [
+        ("src/rag_chatbot/ui/evaluations_page.py", "sdg", "eval_testset"),
+        ("src/rag_chatbot/ui/test_sets_page.py", "eval", "sdg_name"),
+    ],
+    ids=["evaluations-unlocks-after-sdg", "test-sets-unlocks-after-eval"],
+)
+def test_the_form_unlocks_itself_when_another_pages_job_finishes(make_app, app_reruns, page, other_kind, form_key):
+    at, container = make_app()
+    at = AppTest.from_file(str(ROOT / page), default_timeout=TIMEOUT)
+    release = threading.Event()
+    job_id = container.jobs.submit(other_kind, "Other page's job", lambda report: release.wait(TIMEOUT) and None)
+    at.run()
+    widget = at.selectbox(key=form_key) if form_key == "eval_testset" else at.text_input(key=form_key)
+    assert widget.disabled
+    assert app_reruns == []
+
+    release.set()
+    container.jobs.wait(job_id, timeout=TIMEOUT)
+    at.run()  # the job panel's next poll
+    assert "app" in app_reruns  # the panel asked for a whole-page rerun so the form unlocks on its own
+    widget = at.selectbox(key=form_key) if form_key == "eval_testset" else at.text_input(key=form_key)
+    assert not widget.disabled

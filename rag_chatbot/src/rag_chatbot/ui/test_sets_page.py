@@ -26,6 +26,7 @@ ss = st.session_state
 ss.setdefault("sdg_job_id", None)  # the generation this session follows: started here, or seen running
 ss.setdefault("sdg_job_started_here", False)
 ss.setdefault("sdg_job_seen_active", False)  # so the page refreshes once when that job ends
+ss.setdefault("sdg_other_job_seen", False)  # a non-SDG job locked the form; unlock it when it ends
 ss.setdefault("sdg_estimate", None)  # (inputs, GenerationEstimate) for the inputs it was made for
 ss.setdefault("sdg_form_error", None)
 ss.setdefault("sdg_selected", None)  # test set id shown in the detail view (the select box's key)
@@ -47,8 +48,12 @@ def _testset_label(item: TestsetListItem) -> str:
 @st.fragment(run_every="2s")
 def job_panel() -> None:
     active = sdg.active_job()
+    if active is None and ss.sdg_other_job_seen:  # the job that locked the form has finished
+        ss.sdg_other_job_seen = False
+        st.rerun(scope="app")  # the form is outside this fragment
     if active is not None:
         if active.kind != "sdg":
+            ss.sdg_other_job_seen = True
             st.info(f"Another job is running: {active.label}. Generation is available when it finishes.")
             return
         if active.job_id != ss.sdg_job_id:  # started in another tab: follow it like our own

@@ -30,6 +30,7 @@ ss = st.session_state
 ss.setdefault("eval_job_id", None)  # the evaluation this session follows: started here, or seen running
 ss.setdefault("eval_job_started_here", False)
 ss.setdefault("eval_job_seen_active", False)  # so the page refreshes once when that job ends
+ss.setdefault("eval_other_job_seen", False)  # a non-evaluation job locked the form; unlock it when it ends
 ss.setdefault("eval_estimate", None)  # (inputs, EvaluationEstimate) for the inputs it was made for
 ss.setdefault("eval_form_error", None)
 ss.setdefault("eval_started_warnings", [])
@@ -64,8 +65,12 @@ def _pipeline_label(name: str) -> str:
 @st.fragment(run_every="2s")
 def job_panel() -> None:
     active = evals.active_job()
+    if active is None and ss.eval_other_job_seen:  # the job that locked the form has finished
+        ss.eval_other_job_seen = False
+        st.rerun(scope="app")  # the form is outside this fragment
     if active is not None:
         if active.kind != "eval":
+            ss.eval_other_job_seen = True
             st.info(f"Another job is running: {active.label}. Evaluations can start when it finishes.")
             return
         if active.job_id != ss.eval_job_id:  # started in another tab: follow it like our own
