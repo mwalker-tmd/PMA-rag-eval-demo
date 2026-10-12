@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from functools import cached_property
 
-from langchain_core.embeddings import Embeddings
+from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
 from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 
@@ -17,7 +18,7 @@ from rag_chatbot.adapters.llm.fake_adapter import FakeLLMAdapter
 from rag_chatbot.adapters.llm.openai_adapter import OpenAILLMAdapter
 from rag_chatbot.adapters.sdg.fake_generator import FakeTestsetGenerator
 from rag_chatbot.adapters.sdg.ragas_generator import RagasTestsetGenerator
-from rag_chatbot.config import Settings, load_settings
+from rag_chatbot.config import ConfigError, Settings, load_settings  # noqa: F401 - ConfigError re-exported
 from rag_chatbot.ingestion.indexer import IndexManager, Progress
 from rag_chatbot.pipelines.base import PipelineSpec
 from rag_chatbot.pipelines.registry import PIPELINES
@@ -27,12 +28,14 @@ from rag_chatbot.ports.evaluator import EvaluatorPort
 from rag_chatbot.ports.llm import LLMPort
 from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.chat_service import ChatService
+from rag_chatbot.services.evaluation_service import EvaluationService
 from rag_chatbot.services.jobs import JobRunner
 from rag_chatbot.services.sdg_service import SdgService
 
 
-class ConfigError(Exception):
-    pass
+
+
+FAKE_EMBEDDING_DIM = 64  # EMBEDDING_PROVIDER=fake
 
 
 def build_llm(settings: Settings) -> LLMPort:
@@ -96,9 +99,15 @@ class Container:
     # Built on first use, so pages that never evaluate don't need judge config (or OPENAI_API_KEY for it).
     evaluator_override: EvaluatorPort | None = None
     _service: ChatService | None = None
+    # The Chat page and an evaluation job can both call start(); only one may build the index.
+    _start_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def start(self, progress: Progress = lambda _msg: None) -> ChatService:
-        """Make sure the index is built, then compile the pipelines. Idempotent."""
+        """Make sure the index is built, then compile the pipelines. Idempotent and thread-safe."""
+        with self._start_lock:
+            return self._start_locked(progress)
+
+    def _start_locked(self, progress: Progress) -> ChatService:
         if self._service is None:
             self.index.ensure(progress)
             graphs, unavailable = {}, {}
@@ -118,6 +127,21 @@ class Container:
         return self.evaluator_override or build_evaluator(self.settings)
 
     @cached_property
+    def evaluation(self) -> EvaluationService:
+        return EvaluationService(
+            settings=self.settings,
+            specs=self.specs,
+            llm=self.llm,
+            datasets=self.datasets,
+            eval_runs=self.eval_runs,
+            jobs=self.jobs,
+            evaluator=lambda: self.evaluator,
+            chat=self.start,
+            index_digest=self.index.manifest_digest,
+            row_delay_seconds=self.settings.eval_row_delay_seconds,
+        )
+
+    @cached_property
     def sdg(self) -> SdgService:
         return SdgService(
             datasets=self.datasets,
@@ -127,6 +151,10 @@ class Container:
             price_input_per_mtok=self.settings.sdg_price_input_per_mtok,
             price_output_per_mtok=self.settings.sdg_price_output_per_mtok,
         )
+
+    def close(self) -> None:
+        """Release the embedded vector index (and its lock). The app never calls this; scripts do when they're done."""
+        self.index.client.close()
 
     def rebuild_index(self, progress: Progress = lambda _msg: None) -> dict[str, int]:
         # Compiled graphs hold references to the same collections/docstore paths, so they stay valid.
@@ -159,17 +187,24 @@ def build_index_manager(
     client: QdrantClient | None = None,
     embedding_dim: int | None = None,
 ) -> IndexManager:
+    embedding_model = settings.embedding_model
     if embeddings is None:
-        if not settings.openai_api_key:
-            raise ConfigError("OPENAI_API_KEY is not set in .env (needed for embeddings)")
-        embeddings = OpenAIEmbeddings(model=settings.embedding_model, api_key=settings.openai_api_key)
+        if settings.embedding_provider == "fake":  # tests only: deterministic, offline
+            embeddings, embedding_dim = DeterministicFakeEmbedding(size=FAKE_EMBEDDING_DIM), FAKE_EMBEDDING_DIM
+            embedding_model = f"fake:{FAKE_EMBEDDING_DIM}"  # never mistaken for a real-embeddings index
+        elif settings.embedding_provider == "openai":
+            if not settings.openai_api_key:
+                raise ConfigError("OPENAI_API_KEY is not set in .env (needed for embeddings)")
+            embeddings = OpenAIEmbeddings(model=settings.embedding_model, api_key=settings.openai_api_key)
+        else:
+            raise ConfigError(f"Unknown EMBEDDING_PROVIDER '{settings.embedding_provider}' (expected: openai, fake)")
     if client is None:
         settings.index_dir.mkdir(parents=True, exist_ok=True)
         client = QdrantClient(path=str(settings.index_dir / "qdrant"))
     return IndexManager(
         client=client,
         embeddings=embeddings,
-        embedding_model=settings.embedding_model,
+        embedding_model=embedding_model,
         data_dir=settings.data_dir,
         index_dir=settings.index_dir,
         specs=PIPELINES,
@@ -195,7 +230,7 @@ def build_container(
     testset_generator = testset_generator or build_testset_generator(settings)
     index = build_index_manager(settings, embeddings=embeddings, client=client, embedding_dim=embedding_dim)
     datasets = datasets or FileDatasetRepository(settings.datasets_dir)
-    return Container(
+    container = Container(
         settings=settings,
         llm=llm,
         index=index,
@@ -204,3 +239,7 @@ def build_container(
         eval_runs=eval_runs or FileEvalRunRepository(settings.evals_dir),
         evaluator_override=evaluator,
     )
+    # Runs still RUNNING belong to a process that's gone. This happens after the vector index (and its
+    # lock) was opened above, so a second process fails on that lock before it could touch live runs.
+    container.evaluation.recover_interrupted_runs()
+    return container

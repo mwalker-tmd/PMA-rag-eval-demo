@@ -7,6 +7,7 @@ last, so an interrupted build is also treated as stale.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import threading
@@ -70,6 +71,15 @@ class IndexManager:
             "pdfs": corpus_fingerprint(self.data_dir).files,
             "pipelines": {name: spec.settings for name, spec in self.specs.items()},
         }
+
+    def manifest_digest(self) -> str:
+        """Identity of the index *definition* (PDFs, embedding model, pipeline settings), recorded on each run.
+
+        Computed from expected_manifest() rather than manifest.json, so it's known before the index is
+        built and doesn't change with vector counts.
+        """
+        canonical = json.dumps(self.expected_manifest(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
 
     def _read_manifest(self) -> dict | None:
         try:

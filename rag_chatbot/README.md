@@ -175,6 +175,59 @@ per test set:
 - `.datasets/` is git-ignored. Test sets contain passages from the PDFs, which are
   never committed.
 
+## Running evaluations
+
+An evaluation answers every question in a saved test set with one or more pipelines
+(using `LLM_MODEL`), scores the answers with the judge (`EVAL_JUDGE_MODEL`), and saves
+one run per pipeline. Runs started together share a batch.
+
+```bash
+uv run python scripts/run_eval.py --testset <testset_id>                       # all available pipelines
+uv run python scripts/run_eval.py --testset <testset_id> --pipelines baseline,parent_child --effort low
+uv run python scripts/run_eval.py --testset <testset_id> --reference parent_child
+```
+
+**Stop the app first.** Evaluating needs the vector index, and the embedded index allows
+one process at a time. If the app is running, the CLI exits with an "already accessed"
+error and touches nothing.
+
+The CLI prints any warnings (for example, a judge that's the same model as `LLM_MODEL`,
+or a stale test set), shows progress, and ends with a comparison table: metrics as rows,
+one column per pipeline, and a Δ column against `--reference` (default: the first
+pipeline). It exits with 0 when every run completed, 2 when some failed, and 1 on errors.
+
+How a batch runs:
+1. **The judge is checked first** (`preflight`), before any answering, so an
+   incompatible judge model costs nothing. If it fails, every run in the batch fails
+   with that message.
+2. **Each pipeline in turn** answers every question, pausing `EVAL_ROW_DELAY_SECONDS`
+   (default 2) between them. If a question fails to answer, the error is kept and all
+   of its scores are `None`, and the run continues.
+3. **The successful answers are scored.** If the judge fails for one pipeline, that run
+   fails, keeping its answers, and the next pipeline still runs. A run where every
+   answer failed also fails ("no answers to score").
+4. **Aggregates** are the mean of each metric over the answers that have a score.
+
+**What each run records:**
+- the test set
+- the pipeline and a snapshot of its settings
+- the answering model and reasoning effort
+- the judge model and effort, the embeddings and Ragas version
+- the metrics
+- a digest identifying the vector index's definition (PDFs, embedding model, pipeline
+  settings)
+- answering and judging token usage
+- per question: the answer, retrieved contexts, scores, latency and any error
+
+If the server stops mid-evaluation, its runs are marked failed ("Interrupted (server
+restarted)") the next time the app or CLI starts.
+
+**Reading the results:** in a live check against two Northwind test documents, Baseline
+(50-character chunks) retrieved fragments too short to answer from, so it scored 0.0 on
+`context_recall`. Parent-Child retrieved whole passages and scored 1.0. That gap is
+exactly what comparing runs is meant to surface. Ragas occasionally times out on a
+single judge call, and that score is then `None`.
+
 ## Evaluation runs (storage)
 
 Evaluation runs are saved under `EVALS_DIR` (default `.evals/`), one folder per run:
