@@ -7,6 +7,7 @@ from importlib.metadata import version
 import httpx
 import openai
 import pytest
+from factories import RAGAS_SAMPLES, SDG_DOCS as DOCS
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
@@ -15,15 +16,11 @@ from rag_chatbot.adapters.sdg.fake_generator import FakeTestsetGenerator
 from rag_chatbot.adapters.sdg.ragas_generator import RagasTestsetGenerator
 from rag_chatbot.config import load_settings
 from rag_chatbot.container import ConfigError, build_testset_generator
-from rag_chatbot.domain.datasets import GenerationError, SourceDocument
+from rag_chatbot.domain.datasets import GenerationError
 from rag_chatbot.domain.errors import ModelIncompatible
 from rag_chatbot.domain.models import ReasoningEffort
 from rag_chatbot.ports import testset_generator as port
 
-DOCS = [
-    SourceDocument("Quality is a habit. Teams that review code early find defects cheaply. " * 5, {"source": "q.pdf"}),
-    SourceDocument("Leaders set direction, remove blockers and grow people. " * 5, {"source": "l.pdf"}),
-]
 
 
 def collect():
@@ -75,55 +72,6 @@ def test_fake_can_be_configured_to_fail():
 # ---------- Ragas adapter (Ragas mocked; no network) ----------
 
 
-def _ragas_testset(samples):
-    from ragas.dataset_schema import SingleTurnSample
-    from ragas.testset.synthesizers.testset_schema import Testset, TestsetSample
-
-    return Testset(
-        samples=[
-            TestsetSample(
-                eval_sample=SingleTurnSample(user_input=q, reference=r, reference_contexts=ctx),
-                synthesizer_name=name,
-            )
-            for q, r, ctx, name in samples
-        ]
-    )
-
-
-RAGAS_SAMPLES = [
-    ("What is quality?", "A habit.", ["Quality is a habit."], "single_hop_specifc_query_synthesizer"),
-    ("Who removes blockers?", "Leaders.", ["Leaders remove blockers.", "They grow people."], "multi_hop_abstract_query_synthesizer"),
-]
-
-
-@pytest.fixture
-def mocked_ragas(monkeypatch):
-    """Replace the Ragas pieces the adapter calls, and record how they were called."""
-    calls = {"transforms_applied": 0, "generator_kg": None, "generate_size": None, "sizes": [], "batches": None}
-
-    class FakeRagasGenerator:
-        def __init__(self, llm, embedding_model, knowledge_graph):
-            calls["generator_kg"] = knowledge_graph
-
-        def generate(self, testset_size, query_distribution=None):
-            calls["generate_size"] = testset_size
-            calls["sizes"].append(testset_size)
-            if calls.get("raise"):
-                raise calls["raise"]
-            if calls["batches"] is not None:  # scripted results, one list per call
-                return _ragas_testset(calls["batches"].pop(0) if calls["batches"] else [])
-            return _ragas_testset(RAGAS_SAMPLES)
-
-    def fake_apply_transforms(kg, transforms):
-        calls["transforms_applied"] += 1
-
-    monkeypatch.setattr("ragas.testset.TestsetGenerator", FakeRagasGenerator)
-    monkeypatch.setattr("ragas.testset.transforms.default_transforms", lambda **_: [])
-    monkeypatch.setattr("ragas.testset.transforms.apply_transforms", fake_apply_transforms)
-    monkeypatch.setattr("ragas.testset.synthesizers.default_query_distribution", lambda llm, kg: [])
-    return calls
-
-
 @pytest.fixture
 def ragas_adapter():
     return RagasTestsetGenerator(
@@ -138,7 +86,7 @@ def test_ragas_builds_a_graph_and_converts_samples(mocked_ragas, ragas_adapter):
     assert mocked_ragas["transforms_applied"] == 1
     assert mocked_ragas["generate_size"] == 2
     graph = json.loads(result.knowledge_graph)
-    assert [n["properties"]["document_metadata"]["source"] for n in graph["nodes"]] == ["q.pdf", "l.pdf"]
+    assert [n["properties"]["document_metadata"]["source"] for n in graph["nodes"]] == ["northwind-quality.pdf", "northwind-leadership.pdf"]
     assert [(e.stage, e.fraction) for e in events] == [
         ("building_knowledge_graph", 0.0),
         ("building_knowledge_graph", 1.0),
@@ -159,7 +107,7 @@ def test_ragas_reuses_a_saved_graph_without_applying_transforms(mocked_ragas, ra
 
     assert mocked_ragas["transforms_applied"] == 0
     reused = mocked_ragas["generator_kg"]
-    assert [n.properties["document_metadata"]["source"] for n in reused.nodes] == ["q.pdf", "l.pdf"]
+    assert [n.properties["document_metadata"]["source"] for n in reused.nodes] == ["northwind-quality.pdf", "northwind-leadership.pdf"]
     assert {e.stage for e in events} == {"generating_samples"}
     assert result.knowledge_graph == saved
 
@@ -196,6 +144,17 @@ def test_ragas_returns_fewer_when_the_corpus_runs_dry(mocked_ragas, ragas_adapte
     result = ragas_adapter.generate(DOCS, 3)
     assert len(result.samples) == 1
     assert mocked_ragas["sizes"] == [3, 2]  # stops as soon as a round adds nothing new
+
+
+def test_the_ragas_mock_rejects_calls_that_do_not_match_the_pinned_api(mocked_ragas):
+    """Guards the guard: the mock must fail on signature drift, not silently accept it."""
+    import ragas.testset
+
+    with pytest.raises(TypeError):
+        ragas.testset.TestsetGenerator(generator_llm=None, critic_llm=None, embeddings=None)  # Ragas 0.1.x style
+    gen = ragas.testset.TestsetGenerator(llm=None, embedding_model=None)
+    with pytest.raises(TypeError):
+        gen.generate(test_size=2)  # misspelled keyword
 
 
 def test_ragas_errors_become_generation_errors(mocked_ragas, ragas_adapter):

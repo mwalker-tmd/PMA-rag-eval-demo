@@ -1,8 +1,10 @@
+import inspect
 from pathlib import Path
 
 import pymupdf
 import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding
+from factories import RAGAS_SAMPLES, ragas_testset
 from qdrant_client import QdrantClient
 
 from rag_chatbot.adapters.llm.fake_adapter import FakeLLMAdapter
@@ -71,3 +73,57 @@ def container(settings, fake_llm):
         client=QdrantClient(":memory:"),
         embedding_dim=EMBED_DIM,
     )
+
+
+@pytest.fixture
+def mocked_ragas(monkeypatch):
+    """Replace the Ragas pieces RagasTestsetGenerator calls, and record how they were called.
+
+    Every call is bound against the *real* pinned Ragas signatures first, so an adapter that
+    drifts from the Ragas API fails here with TypeError instead of being hidden by the mock.
+    """
+    import ragas.testset
+    import ragas.testset.synthesizers
+    import ragas.testset.transforms
+
+    real = {
+        "init": inspect.signature(ragas.testset.TestsetGenerator),
+        "generate": inspect.signature(ragas.testset.TestsetGenerator.generate),
+        "default_transforms": inspect.signature(ragas.testset.transforms.default_transforms),
+        "apply_transforms": inspect.signature(ragas.testset.transforms.apply_transforms),
+        "default_query_distribution": inspect.signature(ragas.testset.synthesizers.default_query_distribution),
+    }
+    calls = {"transforms_applied": 0, "generator_kg": None, "generate_size": None, "sizes": [], "batches": None}
+
+    class FakeRagasGenerator:
+        def __init__(self, *args, **kwargs):
+            bound = real["init"].bind(*args, **kwargs)
+            calls["generator_kg"] = bound.arguments.get("knowledge_graph")
+
+        def generate(self, *args, **kwargs):
+            size = real["generate"].bind(self, *args, **kwargs).arguments["testset_size"]
+            calls["generate_size"] = size
+            calls["sizes"].append(size)
+            if calls.get("raise"):
+                raise calls["raise"]
+            if calls["batches"] is not None:  # scripted results, one list per call
+                return ragas_testset(calls["batches"].pop(0) if calls["batches"] else [])
+            return ragas_testset(RAGAS_SAMPLES)
+
+    def fake_default_transforms(*args, **kwargs):
+        real["default_transforms"].bind(*args, **kwargs)
+        return []
+
+    def fake_apply_transforms(*args, **kwargs):
+        real["apply_transforms"].bind(*args, **kwargs)
+        calls["transforms_applied"] += 1
+
+    def fake_default_query_distribution(*args, **kwargs):
+        real["default_query_distribution"].bind(*args, **kwargs)
+        return []
+
+    monkeypatch.setattr("ragas.testset.TestsetGenerator", FakeRagasGenerator)
+    monkeypatch.setattr("ragas.testset.transforms.default_transforms", fake_default_transforms)
+    monkeypatch.setattr("ragas.testset.transforms.apply_transforms", fake_apply_transforms)
+    monkeypatch.setattr("ragas.testset.synthesizers.default_query_distribution", fake_default_query_distribution)
+    return calls

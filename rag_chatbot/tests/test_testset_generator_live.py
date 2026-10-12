@@ -4,49 +4,17 @@ import os
 import threading
 
 import pytest
+from factories import SDG_DOCS
 
 from rag_chatbot.config import load_settings
 from rag_chatbot.container import build_testset_generator
-from rag_chatbot.domain.datasets import SourceDocument
 
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(os.getenv("RUN_LIVE_TESTS") != "1", reason="set RUN_LIVE_TESTS=1 to call the real API"),
 ]
 
-# Ragas rejects documents of 100 tokens or fewer, and multi-hop questions need entities shared across documents.
-DOC_A = """\
-Northwind Labs runs every release through a three-stage quality process. First, engineers pair on
-code review within a day of opening a pull request, because Northwind's data shows that defects found
-in review cost about a tenth as much to fix as defects found in production. Second, the platform team
-maintains a testing pyramid: thousands of fast unit tests, a few hundred integration tests against
-real databases, and a small set of end-to-end tests that exercise the checkout flow. Third, a release
-captain, a rotating role held by a senior engineer for one week, signs off only when error budgets
-are healthy. Priya Raman, Northwind's head of quality, introduced the release captain role in 2023
-after two outages traced back to rushed Friday deployments. Since then, change failure rate has
-dropped from 18 percent to 6 percent. Priya argues that quality is a habit built by many small,
-repeated practices rather than a phase at the end of a project, and she measures it with four
-indicators: deployment frequency, lead time for changes, change failure rate and time to restore.
-"""
-
-DOC_B = """\
-Northwind Labs treats engineering leadership as the work of setting direction, removing blockers and
-growing people. Engineering managers hold weekly one-on-ones and spend at least a third of their time
-on coaching. Priya Raman, who leads quality, partners with the engineering managers to make the
-release captain role a growth opportunity: engineers who serve as release captain learn incident
-response, risk assessment and stakeholder communication. Leadership reviews the four delivery
-indicators, deployment frequency, lead time for changes, change failure rate and time to restore, in a
-monthly operations review, but managers are told never to use the indicators to rank individuals.
-Instead, the indicators guide investment: when lead time rose in early 2024, leadership funded a
-dedicated platform team to speed up the integration test suite. Northwind's leadership principles say
-that a team's long-term velocity depends on psychological safety, clear ownership and a sustainable
-pace, and that heroics during outages are a symptom of missing process rather than something to reward.
-"""
-
-DOCS = [
-    SourceDocument(DOC_A, {"source": "northwind-quality.pdf"}),
-    SourceDocument(DOC_B, {"source": "northwind-leadership.pdf"}),
-]
+DOCS = SDG_DOCS
 
 
 @pytest.fixture(scope="module")
