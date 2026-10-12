@@ -11,12 +11,15 @@ from qdrant_client import QdrantClient
 from rag_chatbot.adapters.datasets.file_repository import FileDatasetRepository
 from rag_chatbot.adapters.llm.fake_adapter import FakeLLMAdapter
 from rag_chatbot.adapters.llm.openai_adapter import OpenAILLMAdapter
+from rag_chatbot.adapters.sdg.fake_generator import FakeTestsetGenerator
+from rag_chatbot.adapters.sdg.ragas_generator import RagasTestsetGenerator
 from rag_chatbot.config import Settings, load_settings
 from rag_chatbot.ingestion.indexer import IndexManager, Progress
 from rag_chatbot.pipelines.base import PipelineSpec
 from rag_chatbot.pipelines.registry import PIPELINES
 from rag_chatbot.ports.datasets import DatasetRepository
 from rag_chatbot.ports.llm import LLMPort
+from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.chat_service import ChatService
 
 
@@ -40,12 +43,28 @@ def build_llm(settings: Settings) -> LLMPort:
     raise ConfigError(f"Unknown LLM_PROVIDER '{settings.llm_provider}' (expected: openai, fake)")
 
 
+def build_testset_generator(settings: Settings) -> TestsetGeneratorPort:
+    if settings.sdg_provider == "ragas":
+        if not settings.openai_api_key:
+            raise ConfigError("OPENAI_API_KEY is not set in .env (needed for test set generation)")
+        return RagasTestsetGenerator(
+            llm_model=settings.sdg_llm_model,
+            embedding_model=settings.sdg_embedding_model,
+            api_key=settings.openai_api_key,
+            reasoning_effort=settings.sdg_reasoning_effort,
+        )
+    if settings.sdg_provider == "fake":
+        return FakeTestsetGenerator()
+    raise ConfigError(f"Unknown SDG_PROVIDER '{settings.sdg_provider}' (expected: ragas, fake)")
+
+
 @dataclass
 class Container:
     settings: Settings
     llm: LLMPort
     index: IndexManager
     datasets: DatasetRepository
+    testset_generator: TestsetGeneratorPort
     specs: dict[str, PipelineSpec] = field(default_factory=lambda: dict(PIPELINES))
     _service: ChatService | None = None
 
@@ -102,10 +121,18 @@ def build_container(
     client: QdrantClient | None = None,
     embedding_dim: int | None = None,
     datasets: DatasetRepository | None = None,
+    testset_generator: TestsetGeneratorPort | None = None,
 ) -> Container:
     settings = settings or load_settings()
-    # Build the LLM first: a config error then fails fast, before the embedded Qdrant lock is taken.
+    # Build config-checked adapters first: a config error then fails fast, before the embedded Qdrant lock is taken.
     llm = llm or build_llm(settings)
+    testset_generator = testset_generator or build_testset_generator(settings)
     index = build_index_manager(settings, embeddings=embeddings, client=client, embedding_dim=embedding_dim)
     datasets = datasets or FileDatasetRepository(settings.datasets_dir)
-    return Container(settings=settings, llm=llm, index=index, datasets=datasets)
+    return Container(
+        settings=settings,
+        llm=llm,
+        index=index,
+        datasets=datasets,
+        testset_generator=testset_generator,
+    )
