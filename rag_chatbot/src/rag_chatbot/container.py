@@ -11,6 +11,8 @@ from qdrant_client import QdrantClient
 
 from rag_chatbot.adapters.datasets.file_repository import FileDatasetRepository
 from rag_chatbot.adapters.eval_runs.file_repository import FileEvalRunRepository
+from rag_chatbot.adapters.evaluation.fake_evaluator import FakeEvaluator
+from rag_chatbot.adapters.evaluation.ragas_evaluator import RagasEvaluator
 from rag_chatbot.adapters.llm.fake_adapter import FakeLLMAdapter
 from rag_chatbot.adapters.llm.openai_adapter import OpenAILLMAdapter
 from rag_chatbot.adapters.sdg.fake_generator import FakeTestsetGenerator
@@ -21,6 +23,7 @@ from rag_chatbot.pipelines.base import PipelineSpec
 from rag_chatbot.pipelines.registry import PIPELINES
 from rag_chatbot.ports.datasets import DatasetRepository
 from rag_chatbot.ports.eval_runs import EvalRunRepository
+from rag_chatbot.ports.evaluator import EvaluatorPort
 from rag_chatbot.ports.llm import LLMPort
 from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.chat_service import ChatService
@@ -63,6 +66,22 @@ def build_testset_generator(settings: Settings) -> TestsetGeneratorPort:
     raise ConfigError(f"Unknown SDG_PROVIDER '{settings.sdg_provider}' (expected: ragas, fake)")
 
 
+def build_evaluator(settings: Settings) -> EvaluatorPort:
+    if settings.eval_provider == "ragas":
+        if not settings.openai_api_key:
+            raise ConfigError("OPENAI_API_KEY is not set in .env (needed for evaluation)")
+        return RagasEvaluator(
+            judge_model=settings.eval_judge_model,
+            embedding_model=settings.eval_embedding_model,
+            api_key=settings.openai_api_key,
+            judge_reasoning_effort=settings.eval_judge_reasoning_effort,
+            timeout_seconds=settings.eval_timeout_seconds,
+        )
+    if settings.eval_provider == "fake":
+        return FakeEvaluator()
+    raise ConfigError(f"Unknown EVAL_PROVIDER '{settings.eval_provider}' (expected: ragas, fake)")
+
+
 @dataclass
 class Container:
     settings: Settings
@@ -74,6 +93,8 @@ class Container:
     specs: dict[str, PipelineSpec] = field(default_factory=lambda: dict(PIPELINES))
     # One runner per container (the app caches one container per process), so jobs are shared and run one at a time.
     jobs: JobRunner = field(default_factory=JobRunner)
+    # Built on first use, so pages that never evaluate don't need judge config (or OPENAI_API_KEY for it).
+    evaluator_override: EvaluatorPort | None = None
     _service: ChatService | None = None
 
     def start(self, progress: Progress = lambda _msg: None) -> ChatService:
@@ -90,6 +111,11 @@ class Container:
                 )
             self._service = ChatService(graphs, unavailable)
         return self._service
+
+    @cached_property
+    def evaluator(self) -> EvaluatorPort:
+        """The configured evaluator. Raises ConfigError on first use if its configuration is incomplete."""
+        return self.evaluator_override or build_evaluator(self.settings)
 
     @cached_property
     def sdg(self) -> SdgService:
@@ -161,6 +187,7 @@ def build_container(
     datasets: DatasetRepository | None = None,
     testset_generator: TestsetGeneratorPort | None = None,
     eval_runs: EvalRunRepository | None = None,
+    evaluator: EvaluatorPort | None = None,
 ) -> Container:
     settings = settings or load_settings()
     # Build config-checked adapters first: a config error then fails fast, before the embedded Qdrant lock is taken.
@@ -175,4 +202,5 @@ def build_container(
         datasets=datasets,
         testset_generator=testset_generator,
         eval_runs=eval_runs or FileEvalRunRepository(settings.evals_dir),
+        evaluator_override=evaluator,
     )

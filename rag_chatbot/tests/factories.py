@@ -168,3 +168,40 @@ def make_sample_results(n: int = 2):
         )
         for i in range(n)
     ]
+
+
+def make_eval_samples():
+    """Two handwritten samples: one grounded in its contexts, one made up."""
+    from rag_chatbot.domain.evals import EvalSample
+
+    context = (
+        "Priya Raman, Northwind's head of quality, introduced the release captain role in 2023 after two "
+        "outages traced back to rushed Friday deployments. Since then, change failure rate has dropped from "
+        "18 percent to 6 percent."
+    )
+    question = "Why did Northwind introduce the release captain role, and what happened to change failure rate?"
+    reference = (
+        "Priya Raman introduced it in 2023 after two outages caused by rushed Friday deployments; "
+        "change failure rate then fell from 18 percent to 6 percent."
+    )
+    grounded = EvalSample(
+        user_input=question,
+        reference=reference,
+        response=(
+            "It was introduced in 2023 by Priya Raman after two outages traced to rushed Friday deployments, "
+            "and change failure rate has since dropped from 18% to 6%."
+        ),
+        retrieved_contexts=[context],
+        reference_contexts=[context],
+    )
+    made_up = EvalSample(
+        user_input=question,
+        reference=reference,
+        response=(
+            "The role was created in 2015 by the CEO to cut cloud costs, and change failure rate rose to 40 percent "
+            "because releases moved to weekends."
+        ),
+        retrieved_contexts=[context],
+        reference_contexts=[context],
+    )
+    return [grounded, made_up]

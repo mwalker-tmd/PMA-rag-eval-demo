@@ -1,19 +1,13 @@
-"""Ragas implementation of TestsetGeneratorPort.
-
-Ragas is imported lazily, inside the methods that use it: importing it applies
-`nest_asyncio` to the process, which the chat app doesn't need unless SDG actually runs.
-"""
+"""Ragas implementation of TestsetGeneratorPort. Ragas is imported lazily (see adapters/ragas_support.py)."""
 
 from __future__ import annotations
 
 import tempfile
-from importlib.metadata import version
 from pathlib import Path
 
-import openai
 from langchain_core.documents import Document
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
+from rag_chatbot.adapters import ragas_support
 from rag_chatbot.adapters.langchain_usage import TokenUsageCallback
 from rag_chatbot.domain.datasets import (
     GenerationError,
@@ -27,7 +21,6 @@ from rag_chatbot.domain.errors import ModelIncompatible
 from rag_chatbot.domain.models import ReasoningEffort
 from rag_chatbot.ports.testset_generator import ProgressCallback
 
-PREFLIGHT_PROMPT = "Reply with the single word OK."
 # Ragas splits `testset_size` across query types with ceil(), so it can return more samples than
 # asked for, and fewer when a type can't find enough scenarios in a small graph. Extra samples are
 # trimmed; a shortfall gets this many extra rounds for the remainder.
@@ -51,7 +44,7 @@ class RagasTestsetGenerator:
             llm_model=llm_model,
             embedding_model=embedding_model,
             reasoning_effort=reasoning_effort.value if reasoning_effort else None,
-            ragas_version=version("ragas"),
+            ragas_version=ragas_support.ragas_version(),
         )
 
     @property
@@ -60,17 +53,9 @@ class RagasTestsetGenerator:
 
     def preflight(self) -> None:
         """One tiny call through the same wrapper and temperature path Ragas uses for generation."""
-        from langchain_core.prompt_values import StringPromptValue
-
-        try:
-            self._ragas_llm().generate_text(StringPromptValue(text=PREFLIGHT_PROMPT))
-        except openai.BadRequestError as e:
-            raise ModelIncompatible(
-                f"SDG_LLM_MODEL '{self._llm_model}' rejected the request Ragas sends "
-                f"(Ragas uses a near-zero temperature, which many reasoning models refuse): {e}"
-            ) from e
-        except Exception as e:
-            raise GenerationError(f"Preflight call to '{self._llm_model}' failed: {type(e).__name__}: {e}") from e
+        ragas_support.preflight(
+            self._ragas_llm(), model=self._llm_model, setting="SDG_LLM_MODEL", other_error=GenerationError
+        )
 
     def generate(
         self,
@@ -140,20 +125,10 @@ class RagasTestsetGenerator:
         return kg
 
     def _ragas_llm(self, usage: TokenUsageCallback | None = None):
-        from ragas.llms import LangchainLLMWrapper
-
-        chat = ChatOpenAI(
-            model=self._llm_model,
-            api_key=self._api_key,
-            reasoning_effort=self._effort.value if self._effort else None,
-            callbacks=[usage] if usage else None,
-        )
-        return LangchainLLMWrapper(chat)
+        return ragas_support.ragas_llm(self._llm_model, api_key=self._api_key, effort=self._effort, usage=usage)
 
     def _ragas_embeddings(self):
-        from ragas.embeddings import LangchainEmbeddingsWrapper
-
-        return LangchainEmbeddingsWrapper(OpenAIEmbeddings(model=self._embedding_model, api_key=self._api_key))
+        return ragas_support.ragas_embeddings(self._embedding_model, api_key=self._api_key)
 
 
 def _to_test_sample(sample) -> TestSample:
