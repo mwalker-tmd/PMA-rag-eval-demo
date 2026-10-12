@@ -121,10 +121,17 @@ if st.button("Estimate", disabled=busy):
 if ss.sdg_form_error:
     st.error(ss.sdg_form_error)
 
-# An estimate only counts for the exact inputs it was made for: change anything and it must be redone.
+# An estimate only counts for the exact inputs and corpus it was made for: change either and it must be redone.
 estimate: GenerationEstimate | None = None
-if ss.sdg_estimate and ss.sdg_estimate[0] == inputs:
-    estimate = ss.sdg_estimate[1]
+stale_reason = None
+if ss.sdg_estimate:
+    made_for, made = ss.sdg_estimate
+    if made_for != inputs:
+        stale_reason = "The inputs changed since the last estimate."
+    elif made.corpus_digest != sdg.corpus_digest():
+        stale_reason = "The PDFs in `data/` changed since the last estimate."
+    else:
+        estimate = made
 
 if estimate is not None:
     with st.container(border=True):
@@ -140,8 +147,8 @@ if estimate is not None:
         if estimate.calibrated:
             notes.append("calibrated from past usage")
         st.caption(" · ".join(notes))
-elif ss.sdg_estimate is not None and not busy:
-    st.caption("The inputs changed since the last estimate. Estimate again before generating.")
+elif stale_reason and not busy:
+    st.caption(f"{stale_reason} Estimate again before generating.")
 
 if st.button("Confirm and generate", type="primary", disabled=busy or estimate is None):
     try:

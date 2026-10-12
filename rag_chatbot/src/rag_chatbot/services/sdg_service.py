@@ -68,6 +68,7 @@ class GenerationEstimate:
     reuses_kg: bool
     calibrated: bool  # True if adjusted using a past test set's actual usage
     model: str  # SDG_LLM_MODEL
+    corpus_digest: str  # fingerprint of the corpus this estimate was made from; compare with corpus_digest()
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,7 @@ class SdgService:
             reuses_kg=reuses_kg,
             calibrated=calibrated,
             model=self._generator.info.llm_model,
+            corpus_digest=fingerprint.digest,
         )
 
     def start_generation(self, req: GenerateTestsetRequest) -> JobId:
@@ -149,6 +151,10 @@ class SdgService:
 
         progress(1.0, "Saving test set")
         return self._save(req, fingerprint, result)
+
+    def corpus_digest(self) -> str:
+        """Fingerprint of the PDFs in data/ right now. An estimate is stale once this differs from its corpus_digest."""
+        return corpus_fingerprint(self._data_dir).digest
 
     def job_status(self, job_id: JobId) -> JobStatus:
         return self._jobs.status(job_id)

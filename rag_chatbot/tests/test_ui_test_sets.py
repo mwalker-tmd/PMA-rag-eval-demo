@@ -300,3 +300,20 @@ def test_a_generation_started_in_another_tab_is_followed_to_completion(make_app)
     assert any("Saved test set" in s.value and "another tab" in s.value for s in tab_b.success)
     assert list(saved_rows(tab_b)["Version"]) == [1]
     assert not button(tab_b, "Estimate").disabled
+
+
+def test_changing_the_pdfs_after_estimating_requires_a_new_estimate(make_app, data_dir):
+    at, _ = make_app()
+    open_test_sets(at)
+    button(at, "Estimate").click().run()
+    assert not button(at, "Confirm and generate").disabled
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Added after the estimate.")
+    doc.save(str(data_dir / "late.pdf"))
+    at.run()
+    assert button(at, "Confirm and generate").disabled
+    assert any("PDFs in `data/` changed" in c.value for c in at.caption)
+
+    button(at, "Estimate").click().run()  # re-estimating against the new corpus unlocks it again
+    assert not button(at, "Confirm and generate").disabled

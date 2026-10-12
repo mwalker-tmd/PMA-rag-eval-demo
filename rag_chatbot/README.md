@@ -109,7 +109,7 @@ LangSmith Datasets:
 3. Check the tokens and cost.
 4. Click **Confirm and generate**.
 
-Changing any input after estimating means you need a new estimate. Generation runs in
+Changing any input, or the PDFs in `data/`, after estimating means you need a new estimate. Generation runs in
 the background with a progress bar, and the form is locked until it finishes. The new
 test set then appears in the list.
 

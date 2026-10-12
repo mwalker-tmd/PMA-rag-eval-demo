@@ -473,3 +473,14 @@ def test_cli_reports_an_invalid_price_and_exits_non_zero(cli_env, monkeypatch, c
     monkeypatch.setenv("SDG_PRICE_OUTPUT_PER_MTOK", "-3")
     assert cli_env(["--name", "core-corpus", "--size", "1", "--yes"]) == 1
     assert "SDG_PRICE_OUTPUT_PER_MTOK" in capsys.readouterr().err
+
+
+def test_estimates_carry_the_corpus_digest_and_it_tracks_changes(service, data_dir):
+    est = service.estimate(req())
+    assert est.corpus_digest == corpus_fingerprint(data_dir).digest == service.corpus_digest()
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Changed corpus.")
+    doc.save(str(data_dir / "changed.pdf"))
+    assert service.corpus_digest() != est.corpus_digest
+    assert service.estimate(req()).corpus_digest == service.corpus_digest()
