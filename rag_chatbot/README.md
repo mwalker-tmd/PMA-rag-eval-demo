@@ -42,9 +42,16 @@ container.py — composition root; the only place concrete adapters are chosen
 
 - `domain/` holds plain types (`LLMRequest`, `LLMResponse`, `ReasoningEffort`, …) and
   errors, with no SDK imports.
-- `ports/llm.py` defines the `LLMPort` protocol.
-- `adapters/llm/` contains the provider implementations. The UI's reasoning-level list
-  comes from `supported_reasoning_efforts()`.
+- `ports/` defines the protocols the app depends on:
+  - `llm.py`: `LLMPort`, for text generation
+  - `datasets.py`: `DatasetRepository`, for saving and loading test sets
+- `adapters/` contains the implementations:
+  - `llm/`: the OpenAI and fake LLM adapters. The UI's reasoning-level list comes from
+    `supported_reasoning_efforts()`.
+  - `datasets/`: the file-based and in-memory test set repositories
+
+Every port has a shared **contract test suite** (`tests/test_*_contract.py`). Each
+adapter of that port must pass it, which is what makes the adapters interchangeable.
 
 ### Adding a provider
 
@@ -52,6 +59,38 @@ container.py — composition root; the only place concrete adapters are chosen
    exceptions to the `domain.errors` types.
 2. Add a branch for it in `container.build_llm`.
 3. Add it to the `adapter` fixture params in `tests/test_llm_port_contract.py`.
+
+### Adding a storage adapter
+
+The same pattern applies to `DatasetRepository`. For example, to store test sets in
+LangSmith Datasets:
+1. Implement the protocol in `adapters/datasets/`.
+2. Add it to the `repo` fixture params in `tests/test_dataset_repository_contract.py`
+   and make the suite pass.
+3. Choose it in `build_container`.
+
+## Test sets (storage)
+
+Synthetic test sets are saved under `DATASETS_DIR` (default `.datasets/`), one folder
+per test set:
+
+```
+.datasets/<id>/manifest.json         # name, version, models, corpus fingerprint, usage, …
+.datasets/<id>/samples.jsonl         # one question / reference / reference contexts per line
+.datasets/<id>/knowledge_graph.json  # optional; lets a new test set reuse the graph
+```
+
+- **Immutable.** A saved test set never changes. A change produces a new version
+  (`version` counts up per `name`, and `parent_id` links back), so runs scored against
+  a test set always stay comparable.
+- **IDs:** `ts_<yyyymmdd>_<hash8>`, where the hash covers the name, the version and
+  the samples.
+- **Corpus fingerprint:** the SHA-256 of every PDF in `data/` when the test set was
+  made. If `data/` has changed since, the test set is stale.
+- **Atomic saves:** a save is written to a temporary folder and renamed into place, so
+  an interrupted save never leaves a partial test set behind.
+- `.datasets/` is git-ignored. Test sets contain passages from the PDFs, which are
+  never committed.
 
 ## Reasoning levels
 

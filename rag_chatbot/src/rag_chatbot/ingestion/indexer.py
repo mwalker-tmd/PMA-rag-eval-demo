@@ -7,7 +7,6 @@ last, so an interrupted build is also treated as stale.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import threading
@@ -19,6 +18,7 @@ from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
 
+from rag_chatbot.ingestion.fingerprint import corpus_fingerprint
 from rag_chatbot.ingestion.loader import list_pdfs, load_pdfs
 from rag_chatbot.pipelines.base import IndexContext, PipelineSpec
 
@@ -30,14 +30,6 @@ EMBEDDING_DIMS = {
 }
 
 Progress = Callable[[str], None]
-
-
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 class IndexManager:
@@ -75,7 +67,7 @@ class IndexManager:
         return {
             "version": MANIFEST_VERSION,
             "embedding_model": self.embedding_model,
-            "pdfs": {p.name: _sha256(p) for p in list_pdfs(self.data_dir)},
+            "pdfs": corpus_fingerprint(self.data_dir).files,
             "pipelines": {name: spec.settings for name, spec in self.specs.items()},
         }
 

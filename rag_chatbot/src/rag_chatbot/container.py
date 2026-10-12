@@ -8,12 +8,14 @@ from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 
+from rag_chatbot.adapters.datasets.file_repository import FileDatasetRepository
 from rag_chatbot.adapters.llm.fake_adapter import FakeLLMAdapter
 from rag_chatbot.adapters.llm.openai_adapter import OpenAILLMAdapter
 from rag_chatbot.config import Settings, load_settings
 from rag_chatbot.ingestion.indexer import IndexManager, Progress
 from rag_chatbot.pipelines.base import PipelineSpec
 from rag_chatbot.pipelines.registry import PIPELINES
+from rag_chatbot.ports.datasets import DatasetRepository
 from rag_chatbot.ports.llm import LLMPort
 from rag_chatbot.services.chat_service import ChatService
 
@@ -43,6 +45,7 @@ class Container:
     settings: Settings
     llm: LLMPort
     index: IndexManager
+    datasets: DatasetRepository
     specs: dict[str, PipelineSpec] = field(default_factory=lambda: dict(PIPELINES))
     _service: ChatService | None = None
 
@@ -98,9 +101,11 @@ def build_container(
     embeddings: Embeddings | None = None,
     client: QdrantClient | None = None,
     embedding_dim: int | None = None,
+    datasets: DatasetRepository | None = None,
 ) -> Container:
     settings = settings or load_settings()
     # Build the LLM first: a config error then fails fast, before the embedded Qdrant lock is taken.
     llm = llm or build_llm(settings)
     index = build_index_manager(settings, embeddings=embeddings, client=client, embedding_dim=embedding_dim)
-    return Container(settings=settings, llm=llm, index=index)
+    datasets = datasets or FileDatasetRepository(settings.datasets_dir)
+    return Container(settings=settings, llm=llm, index=index, datasets=datasets)

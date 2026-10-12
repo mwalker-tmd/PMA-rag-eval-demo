@@ -22,6 +22,7 @@ class Settings:
     embedding_model: str
     data_dir: Path
     index_dir: Path
+    datasets_dir: Path
 
 
 def _resolve(path: str) -> Path:
@@ -50,4 +51,5 @@ def load_settings() -> Settings:
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
         data_dir=_resolve(os.getenv("DATA_DIR", "../data")),
         index_dir=_resolve(os.getenv("INDEX_DIR", ".index")),
+        datasets_dir=_resolve(os.getenv("DATASETS_DIR", ".datasets")),
     )
