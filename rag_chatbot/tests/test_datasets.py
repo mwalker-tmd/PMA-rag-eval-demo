@@ -163,3 +163,16 @@ def test_a_concurrent_save_of_the_same_id_is_reported_as_a_clash(tmp_path, monke
     monkeypatch.setattr("rag_chatbot.adapters.datasets.file_repository.os.rename", another_writer_wins)
     with pytest.raises(TestsetAlreadyExists):
         repo.save(ts)
+
+
+def test_manifests_written_before_requested_size_existed_still_load(tmp_path):
+    import json
+
+    repo = FileDatasetRepository(tmp_path / ".datasets")
+    ts = make_testset()
+    repo.save(ts)
+    manifest_path = repo.root / ts.manifest.id / "manifest.json"
+    data = json.loads(manifest_path.read_text())
+    del data["requested_size"]
+    manifest_path.write_text(json.dumps(data))
+    assert repo.get(ts.manifest.id).manifest.requested_size is None

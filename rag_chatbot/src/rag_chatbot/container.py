@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
@@ -22,6 +23,7 @@ from rag_chatbot.ports.llm import LLMPort
 from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.chat_service import ChatService
 from rag_chatbot.services.jobs import JobRunner
+from rag_chatbot.services.sdg_service import SdgService
 
 
 class ConfigError(Exception):
@@ -86,9 +88,39 @@ class Container:
             self._service = ChatService(graphs, unavailable)
         return self._service
 
+    @cached_property
+    def sdg(self) -> SdgService:
+        return SdgService(
+            datasets=self.datasets,
+            generator=self.testset_generator,
+            jobs=self.jobs,
+            data_dir=self.settings.data_dir,
+            price_input_per_mtok=self.settings.sdg_price_input_per_mtok,
+            price_output_per_mtok=self.settings.sdg_price_output_per_mtok,
+        )
+
     def rebuild_index(self, progress: Progress = lambda _msg: None) -> dict[str, int]:
         # Compiled graphs hold references to the same collections/docstore paths, so they stay valid.
         return self.index.build(progress)
+
+
+def build_sdg_service(
+    settings: Settings | None = None,
+    *,
+    datasets: DatasetRepository | None = None,
+    generator: TestsetGeneratorPort | None = None,
+    jobs: JobRunner | None = None,
+) -> SdgService:
+    """SDG service without the rest of the app. Never opens the Qdrant index, so the CLI can run alongside the app."""
+    settings = settings or load_settings()
+    return SdgService(
+        datasets=datasets or FileDatasetRepository(settings.datasets_dir),
+        generator=generator or build_testset_generator(settings),
+        jobs=jobs or JobRunner(),
+        data_dir=settings.data_dir,
+        price_input_per_mtok=settings.sdg_price_input_per_mtok,
+        price_output_per_mtok=settings.sdg_price_output_per_mtok,
+    )
 
 
 def build_index_manager(

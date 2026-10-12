@@ -117,3 +117,11 @@ def test_mutating_the_saved_object_does_not_change_storage(repo):
     repo.save(ts)
     ts.samples[0].reference_contexts.append("tampered")
     assert "tampered" not in repo.get(ts.manifest.id).samples[0].reference_contexts
+
+
+def test_requested_size_round_trips_and_reaches_the_summary(repo):
+    ts = make_testset(n=2, requested_size=5)  # asked for 5, generated 2
+    repo.save(ts)
+    assert repo.get(ts.manifest.id).manifest.requested_size == 5
+    assert repo.list()[0].requested_size == 5
+    assert repo.list()[0].size == 2

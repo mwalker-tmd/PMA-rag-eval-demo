@@ -69,6 +69,7 @@ class TestsetManifest:
     samples_sha256: str
     usage: TokenUsage | None
     has_knowledge_graph: bool
+    requested_size: int | None = None  # what was asked for; `size` is what was generated (may be lower)
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ class TestsetSummary:
     parent_id: str | None
     corpus_digest: str
     has_knowledge_graph: bool
+    requested_size: int | None = None
 
     @classmethod
     def from_manifest(cls, m: TestsetManifest) -> TestsetSummary:
@@ -105,6 +107,7 @@ class TestsetSummary:
             parent_id=m.parent_id,
             corpus_digest=m.corpus.digest,
             has_knowledge_graph=m.has_knowledge_graph,
+            requested_size=m.requested_size,
         )
 
 

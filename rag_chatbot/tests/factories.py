@@ -26,6 +26,7 @@ def make_testset(
     parent_id: str | None = None,
     with_kg: bool = False,
     tag: str = "",
+    requested_size: int | None = None,
 ) -> Testset:
     samples = [
         TestSample(
@@ -50,6 +51,7 @@ def make_testset(
         samples_sha256=digest,
         usage=TokenUsage(input_tokens=1000, output_tokens=200, total_tokens=1200),
         has_knowledge_graph=with_kg,
+        requested_size=requested_size,
     )
     return Testset(manifest=manifest, samples=samples)
 

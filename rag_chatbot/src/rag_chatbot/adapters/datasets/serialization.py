@@ -34,6 +34,7 @@ def manifest_from_dict(d: dict[str, Any]) -> TestsetManifest:
         samples_sha256=d["samples_sha256"],
         usage=TokenUsage(**usage) if usage else None,
         has_knowledge_graph=d["has_knowledge_graph"],
+        requested_size=d.get("requested_size"),  # absent in manifests written before the field existed
     )
 
 

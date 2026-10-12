@@ -32,6 +32,8 @@ class Settings:
     sdg_llm_model: str = DEFAULT_SDG_LLM_MODEL
     sdg_embedding_model: str = DEFAULT_SDG_EMBEDDING_MODEL
     sdg_reasoning_effort: ReasoningEffort | None = None
+    sdg_price_input_per_mtok: float | None = None  # USD per 1M tokens; both unset = no cost in estimates
+    sdg_price_output_per_mtok: float | None = None
 
 
 def _resolve(path: str) -> Path:
@@ -52,6 +54,16 @@ def _optional_effort(raw: str | None) -> ReasoningEffort | None:
     return ReasoningEffort(raw) if raw else None
 
 
+def _optional_float(name: str) -> float | None:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number (USD per 1M tokens), got {raw!r}") from None
+
+
 def load_settings() -> Settings:
     load_dotenv(PROJECT_ROOT / ".env")
     default_effort = os.getenv("DEFAULT_REASONING_EFFORT", "medium").strip().lower()
@@ -70,4 +82,6 @@ def load_settings() -> Settings:
         sdg_llm_model=(os.getenv("SDG_LLM_MODEL") or DEFAULT_SDG_LLM_MODEL).strip(),
         sdg_embedding_model=(os.getenv("SDG_EMBEDDING_MODEL") or DEFAULT_SDG_EMBEDDING_MODEL).strip(),
         sdg_reasoning_effort=_optional_effort(os.getenv("SDG_REASONING_EFFORT")),
+        sdg_price_input_per_mtok=_optional_float("SDG_PRICE_INPUT_PER_MTOK"),
+        sdg_price_output_per_mtok=_optional_float("SDG_PRICE_OUTPUT_PER_MTOK"),
     )
