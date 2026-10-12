@@ -30,6 +30,18 @@ embedding model or a pipeline setting changes. Use `ingest.py --force` or the
 > Embedded Qdrant allows one process at a time. Stop the app before running
 > `ingest.py`.
 
+## Pages
+
+`app.py` is the entry point. It sets up `st.navigation` with two pages:
+
+| Page | File | What it does |
+|---|---|---|
+| **Chat** | `src/rag_chatbot/ui/chat_page.py` | Ask one pipeline, or compare all three side by side. The first visit builds the vector index if needed. |
+| **Test Sets** | `src/rag_chatbot/ui/test_sets_page.py` | Generate synthetic test sets with an estimate and confirmation step, watch progress, and browse saved test sets. Never builds the vector index. |
+
+Both pages share one cached container (`ui/state.py`), so a generation started on one
+page or tab is visible in all of them.
+
 ## Architecture (Ports and Adapters)
 
 ```
@@ -90,8 +102,18 @@ LangSmith Datasets:
 
 ## Generating test sets
 
-Generate a synthetic test set from the PDFs in `data/` with the CLI. The Test Sets page
-in the app will offer the same thing.
+**In the app:** open **Test Sets**, then:
+1. Choose a name and how many questions you want. Optionally pick a saved knowledge
+   graph to reuse.
+2. Click **Estimate**.
+3. Check the tokens and cost.
+4. Click **Confirm and generate**.
+
+Changing any input after estimating means you need a new estimate. Generation runs in
+the background with a progress bar, and the form is locked until it finishes. The new
+test set then appears in the list.
+
+**From the CLI**, the same steps:
 
 ```bash
 uv run python scripts/generate_testset.py --name core-corpus --size 10
@@ -187,13 +209,17 @@ or `unsupported` to hide the selector.
 ## Tests
 
 ```bash
-uv run pytest                                   # offline: fake LLM, fake embeddings, in-memory Qdrant
-RUN_LIVE_TESTS=1 uv run pytest -m live          # also runs the port contract against the real OpenAI model
-LLM_PROVIDER=fake uv run streamlit run app.py   # click through the UI without generation cost
+uv run pytest                                   # offline: fakes, in-memory Qdrant, Streamlit AppTest for the UI
+RUN_LIVE_TESTS=1 uv run pytest -m live          # also runs the contract suites and end-to-end tests against OpenAI
+LLM_PROVIDER=fake SDG_PROVIDER=fake uv run streamlit run app.py   # click through the UI without generation cost
 ```
 
-The fake-LLM run still needs `OPENAI_API_KEY` if the index has to be built, because
-embeddings always come from OpenAI.
+The UI tests (`tests/test_ui_*.py`) replace the app's cached container with one built
+from fakes, so they need no network.
+
+The fake-provider `streamlit run` still needs `OPENAI_API_KEY` for the Chat page if the
+index has to be built, because embeddings always come from OpenAI. The Test Sets page
+doesn't need the index.
 
 ## Implementation notes
 
