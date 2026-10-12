@@ -266,15 +266,18 @@ or `unsupported` to hide the selector.
 ```bash
 uv run pytest                                   # offline: fakes, in-memory Qdrant, Streamlit AppTest for the UI
 RUN_LIVE_TESTS=1 uv run pytest -m live          # also runs the contract suites and end-to-end tests against OpenAI
-LLM_PROVIDER=fake SDG_PROVIDER=fake uv run streamlit run app.py   # click through the UI without generation cost
+LLM_PROVIDER=fake SDG_PROVIDER=fake EVAL_PROVIDER=fake uv run streamlit run app.py   # click through the UI without model cost
 ```
 
 The UI tests (`tests/test_ui_*.py`) replace the app's cached container with one built
 from fakes, so they need no network.
 
-The fake-provider `streamlit run` still needs `OPENAI_API_KEY` for the Chat page if the
-index has to be built, because embeddings always come from OpenAI. The Test Sets page
-doesn't need the index.
+The fake-provider `streamlit run` makes no model calls, but it still needs
+`OPENAI_API_KEY` to start. The app creates the OpenAI embeddings client for the vector
+index at startup on every page, and #16 tracks making that lazy. The Chat page also uses
+that key to embed documents the first time it builds the index. The Test Sets page never
+builds the index. The evaluator is created only when an evaluation actually runs, so
+judge settings are never needed just to open a page.
 
 ## Implementation notes
 

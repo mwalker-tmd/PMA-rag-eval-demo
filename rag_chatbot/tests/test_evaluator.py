@@ -210,6 +210,27 @@ def test_provider_selection(settings):
 
 def test_container_exposes_the_configured_evaluator(container):
     assert isinstance(container.evaluator, FakeEvaluator)
+    assert container.evaluator is container.evaluator  # built once
+
+
+def test_judge_config_is_only_needed_when_evaluation_is_used(settings):
+    """Regression: building the container mustn't require the evaluator's OPENAI_API_KEY."""
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+    from qdrant_client import QdrantClient
+
+    from rag_chatbot.adapters.llm.fake_adapter import FakeLLMAdapter
+    from rag_chatbot.container import build_container
+
+    container = build_container(
+        replace(settings, eval_provider="ragas", openai_api_key=None),  # judge can't be built without a key
+        llm=FakeLLMAdapter(),
+        embeddings=DeterministicFakeEmbedding(size=32),
+        client=QdrantClient(":memory:"),
+        embedding_dim=32,
+    )
+    assert container.sdg is not None  # other services work
+    with pytest.raises(ConfigError, match="OPENAI_API_KEY"):
+        container.evaluator  # the problem surfaces only when evaluation is used
 
 
 @pytest.mark.parametrize(

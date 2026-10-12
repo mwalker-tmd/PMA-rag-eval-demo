@@ -90,10 +90,11 @@ class Container:
     datasets: DatasetRepository
     testset_generator: TestsetGeneratorPort
     eval_runs: EvalRunRepository
-    evaluator: EvaluatorPort
     specs: dict[str, PipelineSpec] = field(default_factory=lambda: dict(PIPELINES))
     # One runner per container (the app caches one container per process), so jobs are shared and run one at a time.
     jobs: JobRunner = field(default_factory=JobRunner)
+    # Built on first use, so pages that never evaluate don't need judge config (or OPENAI_API_KEY for it).
+    evaluator_override: EvaluatorPort | None = None
     _service: ChatService | None = None
 
     def start(self, progress: Progress = lambda _msg: None) -> ChatService:
@@ -110,6 +111,11 @@ class Container:
                 )
             self._service = ChatService(graphs, unavailable)
         return self._service
+
+    @cached_property
+    def evaluator(self) -> EvaluatorPort:
+        """The configured evaluator. Raises ConfigError on first use if its configuration is incomplete."""
+        return self.evaluator_override or build_evaluator(self.settings)
 
     @cached_property
     def sdg(self) -> SdgService:
@@ -187,7 +193,6 @@ def build_container(
     # Build config-checked adapters first: a config error then fails fast, before the embedded Qdrant lock is taken.
     llm = llm or build_llm(settings)
     testset_generator = testset_generator or build_testset_generator(settings)
-    evaluator = evaluator or build_evaluator(settings)
     index = build_index_manager(settings, embeddings=embeddings, client=client, embedding_dim=embedding_dim)
     datasets = datasets or FileDatasetRepository(settings.datasets_dir)
     return Container(
@@ -197,5 +202,5 @@ def build_container(
         datasets=datasets,
         testset_generator=testset_generator,
         eval_runs=eval_runs or FileEvalRunRepository(settings.evals_dir),
-        evaluator=evaluator,
+        evaluator_override=evaluator,
     )
