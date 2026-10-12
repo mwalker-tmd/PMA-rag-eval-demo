@@ -67,10 +67,25 @@ class InMemoryEvalRunRepository:
             validate=lambda: validate_results(samples, aggregate),
         )
 
-    def fail(self, run_id: str, error: str, samples: list[SampleResult] | None = None) -> None:
+    def fail(
+        self,
+        run_id: str,
+        error: str,
+        samples: list[SampleResult] | None = None,
+        *,
+        answer_usage: TokenUsage | None = None,
+        judge_usage: TokenUsage | None = None,
+    ) -> None:
         self._change(
             run_id,
-            lambda m: replace(m, status=RunStatus.FAILED, finished_at=self._clock(), error=error),
+            lambda m: replace(
+                m,
+                status=RunStatus.FAILED,
+                finished_at=self._clock(),
+                error=error,
+                answer_usage=answer_usage,
+                judge_usage=judge_usage,
+            ),
             samples=samples,
             validate=lambda: validate_results(samples or [], {}),
         )

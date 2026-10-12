@@ -217,3 +217,9 @@ def test_bad_input_to_a_finished_run_reports_finalized(repo, run, write):
     repo.complete(run.run_id, [], {}, judge_usage=None, answer_usage=None)
     with pytest.raises(RunFinalized):
         write(repo, run.run_id)
+
+
+def test_fail_records_the_usage_spent_so_far(repo, run):
+    repo.fail(run.run_id, "EvaluationError: judge timed out", answer_usage=ANSWER, judge_usage=JUDGE)
+    m = repo.get(run.run_id).manifest
+    assert (m.answer_usage, m.judge_usage) == (ANSWER, JUDGE)

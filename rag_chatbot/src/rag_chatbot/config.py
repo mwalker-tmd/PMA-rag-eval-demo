@@ -21,6 +21,11 @@ DEFAULT_EVAL_PROVIDER = "ragas"
 DEFAULT_EVAL_JUDGE_MODEL = "gpt-4.1-mini"
 DEFAULT_EVAL_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_EVAL_TIMEOUT_SECONDS = 360
+DEFAULT_EVAL_ROW_DELAY_SECONDS = 2.0
+
+
+class ConfigError(Exception):
+    """The configuration (.env) is missing or invalid for what was asked."""
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,8 @@ class Settings:
     eval_embedding_model: str = DEFAULT_EVAL_EMBEDDING_MODEL
     eval_judge_reasoning_effort: ReasoningEffort | None = None
     eval_timeout_seconds: int = DEFAULT_EVAL_TIMEOUT_SECONDS
+    eval_row_delay_seconds: float = DEFAULT_EVAL_ROW_DELAY_SECONDS
+    embedding_provider: str = "openai"  # openai | fake (tests only: deterministic, offline)
 
 
 def _resolve(path: str) -> Path:
@@ -89,6 +96,19 @@ def _positive_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _non_negative_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a non-negative number of seconds, got {raw!r}")
+    return value
+
+
 def judge_matches_answer_model(settings: Settings) -> bool:
     """True when the judge would grade its own answers (EVAL_JUDGE_MODEL == LLM_MODEL), which inflates scores."""
     return settings.eval_judge_model.strip().casefold() == settings.llm_model.strip().casefold()
@@ -120,4 +140,6 @@ def load_settings() -> Settings:
         eval_embedding_model=(os.getenv("EVAL_EMBEDDING_MODEL") or DEFAULT_EVAL_EMBEDDING_MODEL).strip(),
         eval_judge_reasoning_effort=_optional_effort(os.getenv("EVAL_JUDGE_REASONING_EFFORT")),
         eval_timeout_seconds=_positive_int("EVAL_TIMEOUT_SECONDS", DEFAULT_EVAL_TIMEOUT_SECONDS),
+        eval_row_delay_seconds=_non_negative_float("EVAL_ROW_DELAY_SECONDS", DEFAULT_EVAL_ROW_DELAY_SECONDS),
+        embedding_provider=(os.getenv("EMBEDDING_PROVIDER") or "openai").strip().lower(),
     )

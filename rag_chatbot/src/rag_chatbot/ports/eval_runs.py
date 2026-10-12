@@ -32,8 +32,18 @@ class EvalRunRepository(Protocol):
         """Mark COMPLETED and set finished_at. Raises RunNotFound, RunFinalized, ValueError (non-finite scores)."""
         ...
 
-    def fail(self, run_id: str, error: str, samples: list[SampleResult] | None = None) -> None:
-        """Mark FAILED, set finished_at, keep any partial samples. Raises RunNotFound, RunFinalized."""
+    def fail(
+        self,
+        run_id: str,
+        error: str,
+        samples: list[SampleResult] | None = None,
+        *,
+        answer_usage: TokenUsage | None = None,
+        judge_usage: TokenUsage | None = None,
+    ) -> None:
+        """Mark FAILED, set finished_at, keep any partial samples and the usage spent so far.
+
+        Raises RunNotFound, RunFinalized."""
         ...
 
     def get(self, run_id: str) -> EvalRun:
