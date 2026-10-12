@@ -23,8 +23,11 @@ class InMemoryDatasetRepository:
     def save(self, testset: Testset, knowledge_graph: bytes | None = None) -> None:
         validate_for_save(testset, knowledge_graph)
         with self._lock:
-            if testset.manifest.id in self._items:
-                raise TestsetAlreadyExists(testset.manifest.id)
+            m = testset.manifest
+            if m.id in self._items:
+                raise TestsetAlreadyExists(m.id)
+            if any(t.manifest.name == m.name and t.manifest.version == m.version for t, _ in self._items.values()):
+                raise TestsetAlreadyExists(f"{m.name} v{m.version}")
             # Deep copy so later mutation of the caller's lists can't change what's stored.
             self._items[testset.manifest.id] = (copy.deepcopy(testset), knowledge_graph)
 

@@ -9,6 +9,12 @@ Layout, one folder per test set:
 Saves are atomic: everything is written to `<root>/.tmp-<uuid>/` and the folder is
 renamed into place only once complete. Leftover `.tmp-*` folders from interrupted
 saves are removed when the repository is created.
+
+Each (name, version) can be saved once, even by separate processes (e.g. the CLI and the
+app): a save first claims `<root>/.versions/<name>@<version>` with an exclusive create, which
+only one writer can win. A failed save releases its claim; a crash leaves the claim behind,
+and `next_version` counts it, so a crash costs a version number (a gap) rather than blocking
+the name.
 """
 
 from __future__ import annotations
@@ -40,28 +46,31 @@ MANIFEST = "manifest.json"
 SAMPLES = "samples.jsonl"
 KNOWLEDGE_GRAPH = "knowledge_graph.json"
 TMP_PREFIX = ".tmp-"
-_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")  # ids are used as folder names; reject anything path-like
+VERSIONS_DIR = ".versions"
+_SAFE_ID = re.compile(r"[A-Za-z0-9_-]+")  # ids are folder names; always .fullmatch() (match + $ allows "\n")
 
 
 class FileDatasetRepository:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / VERSIONS_DIR).mkdir(exist_ok=True)
         for leftover in self.root.glob(f"{TMP_PREFIX}*"):
             shutil.rmtree(leftover, ignore_errors=True)
 
     def save(self, testset: Testset, knowledge_graph: bytes | None = None) -> None:
         validate_for_save(testset, knowledge_graph)
         testset_id = testset.manifest.id
-        if not _SAFE_ID.match(testset_id):
+        if not _SAFE_ID.fullmatch(testset_id):
             raise ValueError(f"Invalid test set id {testset_id!r}")
         target = self.root / testset_id
         if target.exists():
             raise TestsetAlreadyExists(testset_id)
+        claim = self._claim_version(testset.manifest)  # raises TestsetAlreadyExists if (name, version) is taken
 
         tmp = self.root / f"{TMP_PREFIX}{uuid.uuid4().hex}"
-        tmp.mkdir()
         try:
+            tmp.mkdir()
             self._write_samples(tmp, testset)
             if knowledge_graph is not None:
                 (tmp / KNOWLEDGE_GRAPH).write_bytes(knowledge_graph)
@@ -74,6 +83,7 @@ class FileDatasetRepository:
                 raise  # a real filesystem failure (permissions, I/O, …): don't disguise it
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
+            claim.unlink(missing_ok=True)  # this version wasn't saved after all: release it
             raise
 
     def get(self, testset_id: str) -> Testset:
@@ -91,8 +101,8 @@ class FileDatasetRepository:
         return sort_newest_first(summaries)
 
     def next_version(self, name: str) -> int:
-        latest = self.latest(name)
-        return latest.version + 1 if latest else 1
+        saved = [s.version for s in self.list() if s.name == name]
+        return max(saved + self._claimed_versions(name), default=0) + 1
 
     def latest(self, name: str) -> TestsetSummary | None:
         versions = [s for s in self.list() if s.name == name]
@@ -104,9 +114,28 @@ class FileDatasetRepository:
 
     # --- internals ---
 
+    def _claim_version(self, manifest: TestsetManifest) -> Path:
+        if any(s.name == manifest.name and s.version == manifest.version for s in self.list()):
+            raise TestsetAlreadyExists(f"{manifest.name} v{manifest.version}")  # saved before claims existed
+        claim = self.root / VERSIONS_DIR / f"{manifest.name}@{manifest.version}"
+        try:
+            with claim.open("x", encoding="utf-8") as f:  # exclusive create: exactly one writer wins
+                f.write(manifest.id)
+        except FileExistsError:
+            raise TestsetAlreadyExists(f"{manifest.name} v{manifest.version}") from None
+        return claim
+
+    def _claimed_versions(self, name: str) -> list[int]:
+        versions = []
+        for claim in (self.root / VERSIONS_DIR).glob(f"{name}@*"):
+            suffix = claim.name.rpartition("@")[2]
+            if suffix.isdigit():
+                versions.append(int(suffix))
+        return versions
+
     def _folder(self, testset_id: str) -> Path:
         folder = self.root / testset_id
-        if not _SAFE_ID.match(testset_id) or not (folder / MANIFEST).exists():
+        if not _SAFE_ID.fullmatch(testset_id) or not (folder / MANIFEST).exists():
             raise TestsetNotFound(testset_id)
         return folder
 

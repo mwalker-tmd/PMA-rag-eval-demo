@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -130,7 +131,7 @@ def test_non_ascii_text_round_trips(tmp_path):
     assert "日本語" in raw  # stored as readable UTF-8, not \u escapes
 
 
-@pytest.mark.parametrize("bad_id", ["../escape", "a/b", "", ".tmp-x"])
+@pytest.mark.parametrize("bad_id", ["../escape", "a/b", "", ".tmp-x", "ts_20261012_abcdef12\n"])
 def test_path_like_ids_are_not_found(tmp_path, bad_id):
     repo = FileDatasetRepository(tmp_path / ".datasets")
     with pytest.raises(TestsetNotFound):
@@ -147,7 +148,8 @@ def test_filesystem_errors_during_save_are_not_reported_as_id_clashes(tmp_path, 
     monkeypatch.setattr("rag_chatbot.adapters.datasets.file_repository.os.rename", read_only)
     with pytest.raises(PermissionError):
         repo.save(ts)
-    assert list(repo.root.iterdir()) == []  # temp folder cleaned up
+    assert [p.name for p in repo.root.iterdir()] == [".versions"]  # no test set, no temp folder
+    assert list((repo.root / ".versions").iterdir()) == []  # and the version claim was released
 
 
 def test_a_concurrent_save_of_the_same_id_is_reported_as_a_clash(tmp_path, monkeypatch):
@@ -163,3 +165,67 @@ def test_a_concurrent_save_of_the_same_id_is_reported_as_a_clash(tmp_path, monke
     monkeypatch.setattr("rag_chatbot.adapters.datasets.file_repository.os.rename", another_writer_wins)
     with pytest.raises(TestsetAlreadyExists):
         repo.save(ts)
+
+
+def test_manifests_written_before_requested_size_existed_still_load(tmp_path):
+    import json
+
+    repo = FileDatasetRepository(tmp_path / ".datasets")
+    ts = make_testset()
+    repo.save(ts)
+    manifest_path = repo.root / ts.manifest.id / "manifest.json"
+    data = json.loads(manifest_path.read_text())
+    del data["requested_size"]
+    manifest_path.write_text(json.dumps(data))
+    assert repo.get(ts.manifest.id).manifest.requested_size is None
+
+
+def test_two_writers_racing_for_the_same_version_cannot_both_save(tmp_path):
+    """Two repository instances (as the CLI and the app would be) save the same name and version at once."""
+    root = tmp_path / ".datasets"
+    contenders = [make_testset(version=1, tag=f" (writer {i})") for i in range(2)]
+    barrier, outcomes = threading.Barrier(2), []
+
+    def save(ts):
+        repo = FileDatasetRepository(root)
+        barrier.wait()
+        try:
+            repo.save(ts)
+            outcomes.append("saved")
+        except TestsetAlreadyExists:
+            outcomes.append("rejected")
+
+    threads = [threading.Thread(target=save, args=(ts,)) for ts in contenders]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert sorted(outcomes) == ["rejected", "saved"]
+    assert [s.version for s in FileDatasetRepository(root).list()] == [1]
+
+
+def test_a_crashed_save_costs_a_version_number_instead_of_blocking_the_name(tmp_path):
+    repo = FileDatasetRepository(tmp_path / ".datasets")
+    repo.save(make_testset(version=1))
+    (repo.root / ".versions" / "core-corpus@2").write_text("ts_crashed")  # claim left by a killed process
+
+    assert repo.next_version("core-corpus") == 3
+    with pytest.raises(TestsetAlreadyExists):
+        repo.save(make_testset(version=2, tag=" late"))
+    repo.save(make_testset(version=3))
+    assert [s.version for s in repo.list()] == [3, 1]
+    assert repo.latest("core-corpus").version == 3
+
+
+def test_a_failed_save_releases_its_version(tmp_path, monkeypatch):
+    repo = FileDatasetRepository(tmp_path / ".datasets")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(FileDatasetRepository, "_write_manifest", staticmethod(boom))
+    with pytest.raises(RuntimeError):
+        repo.save(make_testset(version=1))
+    monkeypatch.undo()
+    assert repo.next_version("core-corpus") == 1
+    repo.save(make_testset(version=1))
