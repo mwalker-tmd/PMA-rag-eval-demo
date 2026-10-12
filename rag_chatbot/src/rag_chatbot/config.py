@@ -10,6 +10,11 @@ from rag_chatbot.domain.models import ReasoningEffort
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# Test set generation defaults. Non-reasoning models: see README "Choosing models for SDG and judging".
+DEFAULT_SDG_PROVIDER = "ragas"
+DEFAULT_SDG_LLM_MODEL = "gpt-4.1"
+DEFAULT_SDG_EMBEDDING_MODEL = "text-embedding-3-small"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -23,6 +28,10 @@ class Settings:
     data_dir: Path
     index_dir: Path
     datasets_dir: Path
+    sdg_provider: str = DEFAULT_SDG_PROVIDER
+    sdg_llm_model: str = DEFAULT_SDG_LLM_MODEL
+    sdg_embedding_model: str = DEFAULT_SDG_EMBEDDING_MODEL
+    sdg_reasoning_effort: ReasoningEffort | None = None
 
 
 def _resolve(path: str) -> Path:
@@ -36,6 +45,11 @@ def _parse_efforts(raw: str | None) -> list[ReasoningEffort] | None:
     if raw.strip().lower() == "unsupported":
         return []
     return [ReasoningEffort(v.strip().lower()) for v in raw.split(",") if v.strip()]
+
+
+def _optional_effort(raw: str | None) -> ReasoningEffort | None:
+    raw = (raw or "").strip().lower()
+    return ReasoningEffort(raw) if raw else None
 
 
 def load_settings() -> Settings:
@@ -52,4 +66,8 @@ def load_settings() -> Settings:
         data_dir=_resolve(os.getenv("DATA_DIR", "../data")),
         index_dir=_resolve(os.getenv("INDEX_DIR", ".index")),
         datasets_dir=_resolve(os.getenv("DATASETS_DIR", ".datasets")),
+        sdg_provider=(os.getenv("SDG_PROVIDER") or DEFAULT_SDG_PROVIDER).strip().lower(),
+        sdg_llm_model=(os.getenv("SDG_LLM_MODEL") or DEFAULT_SDG_LLM_MODEL).strip(),
+        sdg_embedding_model=(os.getenv("SDG_EMBEDDING_MODEL") or DEFAULT_SDG_EMBEDDING_MODEL).strip(),
+        sdg_reasoning_effort=_optional_effort(os.getenv("SDG_REASONING_EFFORT")),
     )

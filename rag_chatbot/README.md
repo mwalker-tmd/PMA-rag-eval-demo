@@ -45,10 +45,13 @@ container.py — composition root; the only place concrete adapters are chosen
 - `ports/` defines the protocols the app depends on:
   - `llm.py`: `LLMPort`, for text generation
   - `datasets.py`: `DatasetRepository`, for saving and loading test sets
+  - `testset_generator.py`: `TestsetGeneratorPort`, for generating synthetic test samples
 - `adapters/` contains the implementations:
   - `llm/`: the OpenAI and fake LLM adapters. The UI's reasoning-level list comes from
     `supported_reasoning_efforts()`.
   - `datasets/`: the file-based and in-memory test set repositories
+  - `sdg/`: the Ragas and fake test set generators. Ragas is imported only when
+    generation actually runs.
 
 Every port has a shared **contract test suite** (`tests/test_*_contract.py`). Each
 adapter of that port must pass it, which is what makes the adapters interchangeable.
@@ -91,6 +94,35 @@ per test set:
   an interrupted save never leaves a partial test set behind.
 - `.datasets/` is git-ignored. Test sets contain passages from the PDFs, which are
   never committed.
+
+## Choosing models for SDG and judging
+
+Test set generation (`SDG_LLM_MODEL`) and, later, evaluation judging use **non-reasoning
+models by default**: `gpt-4.1` for generation, with `text-embedding-3-small` embeddings.
+The reasons:
+
+- **Compatibility.** Ragas sets the temperature to about 0 (`1e-8`) on every call, so
+  that generation and scoring are as repeatable as possible. Many reasoning models only
+  accept a temperature of 1. LangChain removes the setting for `gpt-5*` models, but not
+  for o-series models or other names, so those requests can be rejected. The generator's
+  `preflight()` check makes one tiny call the same way Ragas does, and reports
+  `ModelIncompatible` before any real spending.
+- **Little benefit.** The work is extraction (summaries, headlines, entities) and writing
+  questions from given text, or grading against a rubric. These gain little from reasoning.
+- **Cost.** Ragas makes many LLM calls: one generation run is dozens, and one evaluation
+  is hundreds. Reasoning tokens multiply the cost of every one.
+
+If you use a reasoning model anyway, set `SDG_REASONING_EFFORT=low` and run the
+preflight check first.
+
+**Sample counts:** Ragas doesn't return an exact number of samples. It splits the
+requested size across question types and rounds each share up, and it can fall short on
+a small corpus. The generator trims any extra, keeping the mix of question types, and
+tops up a shortfall up to twice. It never returns more than requested. It can return
+fewer if the corpus can't support more distinct questions.
+
+**Token usage** recorded for a test set covers LLM calls only, not embeddings, which
+cost very little.
 
 ## Reasoning levels
 

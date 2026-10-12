@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+from typing import Any, Literal
 
 from rag_chatbot.domain.models import TokenUsage
 
@@ -16,6 +17,10 @@ class TestsetNotFound(Exception):
 
 class TestsetAlreadyExists(Exception):
     __test__ = False
+
+
+class GenerationError(Exception):
+    """Test set generation failed. The message carries the underlying error."""
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,32 @@ class TestsetSummary:
             corpus_digest=m.corpus.digest,
             has_knowledge_graph=m.has_knowledge_graph,
         )
+
+
+@dataclass(frozen=True)
+class SourceDocument:
+    """A corpus document handed to a test set generator. SDK-free stand-in for a LangChain Document."""
+
+    text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+GenerationStage = Literal["building_knowledge_graph", "generating_samples"]
+
+
+@dataclass(frozen=True)
+class GenerationProgress:
+    stage: GenerationStage
+    fraction: float | None  # progress within the stage, 0–1; None when no finer progress is known
+    message: str
+
+
+@dataclass(frozen=True)
+class GenerationResult:
+    samples: list[TestSample]
+    knowledge_graph: bytes  # serialized graph, saved so later test sets can reuse it
+    generator: GeneratorInfo
+    usage: TokenUsage | None  # LLM tokens only; None when the adapter can't measure them
 
 
 def samples_sha256(samples: list[TestSample]) -> str:

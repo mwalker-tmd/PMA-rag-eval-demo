@@ -53,6 +53,7 @@ def settings(tmp_path: Path, data_dir: Path) -> Settings:
         data_dir=data_dir,
         index_dir=tmp_path / ".index",
         datasets_dir=tmp_path / ".datasets",
+        sdg_provider="fake",
     )
 
 
