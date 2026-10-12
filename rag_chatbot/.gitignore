@@ -1,6 +1,7 @@
 .env
 .index/
 .datasets/
+.evals/
 .venv/
 __pycache__/
 .pytest_cache/

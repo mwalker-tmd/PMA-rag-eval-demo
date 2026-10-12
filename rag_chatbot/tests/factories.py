@@ -114,3 +114,57 @@ def ragas_testset(samples):
             for q, r, ctx, name in samples
         ]
     )
+
+
+# ---------- evaluation runs ----------
+
+
+def make_run_manifest(
+    run_id: str = "run_20261012-090000_baseline_ab12",
+    *,
+    batch_id: str = "batch_20261012-090000_cd34",
+    testset_id: str = "ts_20261012_aaaaaaaa",
+    pipeline: str = "baseline",
+    started_at: datetime = T0,
+):
+    from rag_chatbot.domain.evals import EvalRunManifest, RunStatus
+
+    return EvalRunManifest(
+        run_id=run_id,
+        batch_id=batch_id,
+        testset_id=testset_id,
+        pipeline=pipeline,
+        pipeline_settings={"chunk_size": 50, "chunk_overlap": 0, "k": 3},
+        answer_model="gpt-5-mini",
+        reasoning_effort="low",
+        judge_model="gpt-4.1-mini",
+        judge_reasoning_effort=None,
+        embedding_model="text-embedding-3-small",
+        metrics=["faithfulness", "answer_relevancy"],
+        ragas_version="0.2.10",
+        index_manifest_digest="d" * 64,
+        status=RunStatus.RUNNING,
+        progress=0.0,
+        message="Starting",
+        started_at=started_at,
+        finished_at=None,
+        error=None,
+    )
+
+
+def make_sample_results(n: int = 2):
+    from rag_chatbot.domain.evals import SampleResult
+
+    return [
+        SampleResult(
+            user_input=f"Question {i}? — café 日本語",
+            reference=f"Answer {i}.",
+            response=f"Response {i}." if i % 2 == 0 else None,
+            retrieved_contexts=[f"context {i}a", f"context {i}b"],
+            scores={"faithfulness": 0.75 if i % 2 == 0 else None, "answer_relevancy": 0.5},
+            latency_ms=123.4,
+            usage=TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120),
+            error=None if i % 2 == 0 else "LLMRateLimitError: throttled",
+        )
+        for i in range(n)
+    ]
