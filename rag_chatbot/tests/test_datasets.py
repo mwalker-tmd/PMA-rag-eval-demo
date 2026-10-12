@@ -1,13 +1,21 @@
 """Unit tests for test-set domain helpers and the corpus fingerprint, plus file-adapter integration tests."""
 
 import hashlib
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from factories import make_testset
 
 from rag_chatbot.adapters.datasets.file_repository import FileDatasetRepository
-from rag_chatbot.domain.datasets import CorpusFingerprint, TestsetNotFound, new_testset_id, samples_sha256
+from rag_chatbot.domain.datasets import (
+    CorpusFingerprint,
+    TestsetAlreadyExists,
+    TestsetNotFound,
+    new_testset_id,
+    samples_sha256,
+)
 from rag_chatbot.ingestion.fingerprint import corpus_fingerprint
 
 DAY = datetime(2026, 10, 12, 15, 30, tzinfo=UTC)
@@ -127,3 +135,31 @@ def test_path_like_ids_are_not_found(tmp_path, bad_id):
     repo = FileDatasetRepository(tmp_path / ".datasets")
     with pytest.raises(TestsetNotFound):
         repo.get(bad_id)
+
+
+def test_filesystem_errors_during_save_are_not_reported_as_id_clashes(tmp_path, monkeypatch):
+    repo = FileDatasetRepository(tmp_path / ".datasets")
+    ts = make_testset()
+
+    def read_only(*_args):
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr("rag_chatbot.adapters.datasets.file_repository.os.rename", read_only)
+    with pytest.raises(PermissionError):
+        repo.save(ts)
+    assert list(repo.root.iterdir()) == []  # temp folder cleaned up
+
+
+def test_a_concurrent_save_of_the_same_id_is_reported_as_a_clash(tmp_path, monkeypatch):
+    repo = FileDatasetRepository(tmp_path / ".datasets")
+    ts = make_testset()
+    real_rename = os.rename
+
+    def another_writer_wins(src, dst):
+        Path(dst).mkdir()
+        (Path(dst) / "manifest.json").write_text("{}")  # non-empty, so the rename fails
+        real_rename(src, dst)
+
+    monkeypatch.setattr("rag_chatbot.adapters.datasets.file_repository.os.rename", another_writer_wins)
+    with pytest.raises(TestsetAlreadyExists):
+        repo.save(ts)

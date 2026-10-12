@@ -4,7 +4,7 @@ To add an adapter, add it to the `repo` fixture's params; every test below then 
 """
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 from factories import T0, make_testset
@@ -100,8 +100,9 @@ def test_identical_samples_in_two_versions_get_distinct_ids(repo):
         lambda m: replace(m, samples_sha256="0" * 64),
         lambda m: replace(m, has_knowledge_graph=True),  # but no graph given
         lambda m: replace(m, created_at=m.created_at.replace(tzinfo=None)),
+        lambda m: replace(m, created_at=m.created_at.astimezone(timezone(timedelta(hours=5)))),
     ],
-    ids=["size", "samples_sha256", "has_knowledge_graph", "naive_datetime"],
+    ids=["size", "samples_sha256", "has_knowledge_graph", "naive_datetime", "non_utc_datetime"],
 )
 def test_inconsistent_test_sets_are_rejected(repo, corrupt):
     ts = make_testset()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from rag_chatbot.domain.models import TokenUsage
 
@@ -136,5 +136,5 @@ def validate_for_save(testset: Testset, knowledge_graph: bytes | None) -> None:
         raise ValueError("manifest.has_knowledge_graph does not match whether a knowledge graph was given")
     if m.version < 1:
         raise ValueError("manifest.version must be >= 1")
-    if m.created_at.tzinfo is None:
-        raise ValueError("manifest.created_at must be timezone-aware (UTC)")
+    if m.created_at.utcoffset() != timedelta(0):  # None for naive datetimes, non-zero for other zones
+        raise ValueError("manifest.created_at must be a UTC datetime")

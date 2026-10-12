@@ -68,8 +68,10 @@ class FileDatasetRepository:
             self._write_manifest(tmp, testset.manifest)  # last: a folder with a manifest is complete
             try:
                 os.rename(tmp, target)
-            except OSError as e:  # target appeared since the check above
-                raise TestsetAlreadyExists(testset_id) from e
+            except OSError as e:
+                if target.exists():  # another save took this id since the check above
+                    raise TestsetAlreadyExists(testset_id) from e
+                raise  # a real filesystem failure (permissions, I/O, …): don't disguise it
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
