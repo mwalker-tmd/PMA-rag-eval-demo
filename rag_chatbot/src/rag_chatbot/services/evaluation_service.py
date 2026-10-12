@@ -30,6 +30,7 @@ from rag_chatbot.domain.evals import (
 )
 from rag_chatbot.domain.models import PipelineResult, ReasoningEffort, TokenUsage
 from rag_chatbot.ingestion.fingerprint import corpus_fingerprint
+from rag_chatbot.ingestion.loader import list_pdfs
 from rag_chatbot.pipelines.base import PipelineSpec
 from rag_chatbot.ports.datasets import DatasetRepository
 from rag_chatbot.ports.eval_runs import EvalRunRepository
@@ -172,8 +173,17 @@ class EvaluationService:
             job_id=job_id, batch_id=batch.batch_id, run_ids=list(batch.run_ids.values()), warnings=batch.warnings
         )
 
-    def run_evaluation(self, req: StartEvaluationRequest, on_progress: ProgressReporter | None = None) -> list[EvalRunSummary]:
+    def run_evaluation(
+        self,
+        req: StartEvaluationRequest,
+        on_progress: ProgressReporter | None = None,
+        on_warning: Callable[[str], None] | None = None,
+    ) -> list[EvalRunSummary]:
+        """Synchronous evaluation (the CLI). Batch warnings (e.g. a stale test set) go to `on_warning`
+        before any answering starts; start_evaluation returns the same warnings in StartedEvaluation."""
         batch = self._prepare(req)
+        for warning in batch.warnings:
+            (on_warning or (lambda _w: None))(warning)
         self._execute(batch, on_progress or (lambda _p, _m: None))
         return [self._summary(run_id) for run_id in batch.run_ids.values()]
 
@@ -259,6 +269,9 @@ class EvaluationService:
         testset = self._datasets.get(req.testset_id)  # TestsetNotFound
         if not testset.samples:
             raise InvalidRequest(f"Test set {req.testset_id} has no questions.")
+        data_dir = Path(self._settings.data_dir)
+        if not data_dir.is_dir() or not list_pdfs(data_dir):  # answering needs the index, which needs the PDFs
+            raise InvalidRequest(f"No PDFs found in {data_dir}: add the corpus before evaluating.")
         pipelines = self._pipelines(req.pipelines)
         effort = req.reasoning_effort
         if effort is not None and effort not in self._llm.supported_reasoning_efforts():
@@ -368,9 +381,15 @@ class EvaluationService:
             report(done / total_steps, message)
 
         results = [_partial_result(s, a) for s, a in zip(batch.testset.samples, answers)]
+        answer_usage = _sum_usage(answers)
         answered = [i for i, a in enumerate(answers) if a.ok and a.answer]
         if not answered:
-            self._runs.fail(run_id, f"No answers to score: all {n} questions failed to answer", samples=results)
+            self._runs.fail(
+                run_id,
+                f"No answers to score: all {n} questions failed to answer",
+                samples=results,
+                answer_usage=answer_usage,
+            )
             return done + n
 
         self._runs.update_progress(run_id, 0.5, f"{label}: scoring {len(answered)} answers")
@@ -385,10 +404,21 @@ class EvaluationService:
             )
             for i in answered
         ]
+        highest = [0.0]
+
+        def judging_progress(fraction: float | None, message: str) -> None:
+            # Map the evaluator's 0–1 onto the second half of this run, and onto the batch's scoring steps.
+            # Never let progress go backwards, whatever order the evaluator reports in.
+            if fraction is None:
+                return
+            highest[0] = max(highest[0], min(1.0, max(0.0, fraction)))
+            self._runs.update_progress(run_id, 0.5 + 0.5 * highest[0], f"{label}: {message}")
+            report((done + highest[0] * n) / total_steps, f"{label}: {message}")
+
         try:
-            scored = batch.evaluator.evaluate(eval_samples)
+            scored = batch.evaluator.evaluate(eval_samples, on_progress=judging_progress)
         except (EvaluationError, ModelIncompatible) as e:  # this run fails; the batch carries on
-            self._runs.fail(run_id, f"{type(e).__name__}: {e}", samples=results)
+            self._runs.fail(run_id, f"{type(e).__name__}: {e}", samples=results, answer_usage=answer_usage)
             return done + n
 
         by_index = dict(zip(answered, scored.scores))
@@ -398,9 +428,7 @@ class EvaluationService:
             m: (fmean(vals) if (vals := [r.scores.get(m) for r in results if r.scores.get(m) is not None]) else None)
             for m in DEFAULT_METRICS
         }
-        self._runs.complete(
-            run_id, results, aggregate, judge_usage=scored.usage, answer_usage=_sum_usage(a for a in answers)
-        )
+        self._runs.complete(run_id, results, aggregate, judge_usage=scored.usage, answer_usage=answer_usage)
         done += n
         report(done / total_steps, f"{label}: done")
         return done

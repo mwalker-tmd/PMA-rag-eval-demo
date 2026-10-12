@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from rag_chatbot.domain.models import PipelineResult, ReasoningEffort
+from rag_chatbot.services.jobs import JobAlreadyRunning
 from rag_chatbot.ui.state import container_or_stop
 
 SINGLE, COMPARE = "Single pipeline", "Compare all three"
@@ -70,11 +71,14 @@ with st.sidebar:
     if col_a.button("Clear chat", width="stretch"):
         st.session_state.messages = []
         st.rerun()
-    if col_b.button("Rebuild index", width="stretch"):
-        with st.status("Rebuilding index…", expanded=True) as status:
-            container.rebuild_index(progress=status.write)
-            status.update(label="Index rebuilt", state="complete", expanded=False)
-        st.rerun()
+    if col_b.button("Rebuild index", width="stretch", disabled=container.jobs.active() is not None):
+        try:
+            with st.status("Rebuilding index…", expanded=True) as status:
+                container.rebuild_index(progress=status.write)
+                status.update(label="Index rebuilt", state="complete", expanded=False)
+            st.rerun()
+        except JobAlreadyRunning as e:  # a job started between rendering and clicking
+            st.warning(f"Can't rebuild the index while a job is running ({e.active.label}). Try again when it finishes.")
 
 
 # ---------- rendering ----------

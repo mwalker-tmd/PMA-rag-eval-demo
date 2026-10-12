@@ -317,3 +317,19 @@ def test_changing_the_pdfs_after_estimating_requires_a_new_estimate(make_app, da
 
     button(at, "Estimate").click().run()  # re-estimating against the new corpus unlocks it again
     assert not button(at, "Confirm and generate").disabled
+
+
+def test_chat_disables_index_rebuild_while_a_job_runs(make_app):
+    generator = BlockingGenerator()
+    at, container = make_app(generator, entry="app")
+    at.run()
+    rebuild = lambda: next(b for b in at.sidebar.button if b.label == "Rebuild index")  # noqa: E731
+    assert not rebuild().disabled
+
+    job_id = container.jobs.submit("eval", "Evaluate Baseline", lambda report: generator.release.wait(TIMEOUT) and None)
+    at.run()
+    assert rebuild().disabled
+    generator.release.set()
+    container.jobs.wait(job_id, timeout=TIMEOUT)
+    at.run()
+    assert not rebuild().disabled

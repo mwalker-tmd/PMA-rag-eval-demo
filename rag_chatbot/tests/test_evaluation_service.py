@@ -420,3 +420,99 @@ def test_fake_embeddings_need_no_api_key_and_are_labelled(settings, tmp_path):
     assert len(index.embeddings.embed_query("hello")) == 64
     with pytest.raises(ConfigError, match="EMBEDDING_PROVIDER"):
         build_index_manager(replace(s, embedding_provider="nope"), client=QdrantClient(":memory:"))
+
+
+# ---------- review regressions (PR #20) ----------
+
+
+class BlockingLLM(FakeLLMAdapter):
+    def __init__(self):
+        super().__init__()
+        self.started, self.release = threading.Event(), threading.Event()
+
+    def generate(self, request):
+        self.started.set()
+        self.release.wait(TIMEOUT)
+        return super().generate(request)
+
+
+def test_rebuilding_the_index_is_refused_while_an_evaluation_runs(make_env):
+    llm = BlockingLLM()
+    container, testset_id = make_env(llm=llm)
+    started = container.evaluation.start_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+    assert llm.started.wait(TIMEOUT)
+    counts = container.index.counts()
+    with pytest.raises(JobAlreadyRunning):
+        container.rebuild_index()
+    assert container.index.counts() == counts  # untouched mid-evaluation
+    llm.release.set()
+    assert container.jobs.wait(started.job_id, timeout=TIMEOUT).state is JobState.COMPLETED
+    assert container.rebuild_index()  # allowed once the job is done
+
+
+def test_an_evaluation_started_during_a_rebuild_waits_for_it(make_env):
+    llm = FakeLLMAdapter()
+    container, testset_id = make_env(llm=llm)
+    container.start()  # index built, service ready
+    with container._start_lock:  # what rebuild_index() holds while rebuilding
+        started = container.evaluation.start_evaluation(StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)))
+        assert container.jobs.wait(started.job_id, timeout=0.3).state is JobState.RUNNING
+        assert llm.requests == []  # nothing answered against a half-built index
+    assert container.jobs.wait(started.job_id, timeout=TIMEOUT).state is JobState.COMPLETED
+
+
+def test_synchronous_runs_report_batch_warnings(make_env, data_dir):
+    container, testset_id = make_env(eval_judge_model="fake-model")
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Changed corpus.")
+    doc.save(str(data_dir / "changed.pdf"))
+    warnings = []
+    container.evaluation.run_evaluation(
+        StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)), on_warning=warnings.append
+    )
+    assert any("stale" in w for w in warnings)
+    assert any("same as the answering model" in w for w in warnings)
+
+
+@pytest.mark.parametrize("problem", ["missing", "empty"])
+def test_a_missing_corpus_is_an_invalid_request_and_creates_nothing(make_env, data_dir, problem):
+    import shutil
+
+    container, testset_id = make_env()
+    if problem == "missing":
+        shutil.rmtree(data_dir)
+    else:
+        for pdf in data_dir.glob("*.pdf"):
+            pdf.unlink()
+    with pytest.raises(InvalidRequest, match="No PDFs found"):
+        container.evaluation.run_evaluation(StartEvaluationRequest(testset_id=testset_id))
+    assert container.eval_runs.list() == []
+
+
+class SteppedEvaluator(FakeEvaluator):
+    """Reports progress halfway through judging, like a finer-grained evaluator would."""
+
+    def evaluate(self, samples, metrics=DEFAULT_METRICS, *, on_progress=None):
+        if on_progress:
+            on_progress(0.5, "halfway through judging")
+        return super().evaluate(samples, metrics, on_progress=on_progress)
+
+
+def test_judging_progress_flows_into_run_and_batch_progress(make_env):
+    container, testset_id = make_env(evaluator=SteppedEvaluator(), size=2)
+    events = []
+    [summary] = container.evaluation.run_evaluation(
+        StartEvaluationRequest(testset_id=testset_id, pipelines=("baseline",)), on_progress=lambda p, m: events.append((p, m))
+    )
+    halfway = [p for p, m in events if "halfway through judging" in m]
+    assert halfway == [pytest.approx(0.75)]  # answered 2 of 4 steps, then half of the 2 scoring steps
+    fractions = [p for p, _ in events]
+    assert fractions == sorted(fractions) and fractions[-1] == 1.0
+
+
+def test_a_judge_failure_keeps_the_answering_usage(make_env):
+    container, testset_id = make_env(evaluator=EvaluatorFailingOnCall(failing_call=1))
+    started, _ = run_batch(container, testset_id, pipelines=("baseline",))
+    m = container.eval_runs.get(started.run_ids[0]).manifest
+    assert m.status is RunStatus.FAILED
+    assert m.answer_usage is not None and m.answer_usage.total_tokens > 0

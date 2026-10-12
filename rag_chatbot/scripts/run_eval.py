@@ -53,16 +53,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _evaluate(service, request: StartEvaluationRequest, args) -> int:
-    for warning in service.warnings():
-        print(f"Warning: {warning}")
-
+    # Warnings (judge == answering model, stale test set) are printed via on_warning before answering starts.
     def report(progress, message):
         pct = f"{progress:4.0%}" if progress is not None else "  … "
         print(f"[{pct}] {message}", flush=True)
 
     try:
-        runs = service.run_evaluation(request, report)
-    except (InvalidRequest, TestsetNotFound, PipelineUnavailable, ModelIncompatible, EvaluationError) as e:
+        runs = service.run_evaluation(request, report, on_warning=lambda w: print(f"Warning: {w}"))
+    except (InvalidRequest, TestsetNotFound, PipelineUnavailable, ModelIncompatible, EvaluationError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

@@ -219,6 +219,11 @@ How a batch runs:
 - answering and judging token usage
 - per question: the answer, retrieved contexts, scores, latency and any error
 
+While an evaluation (or any job) is running, the Chat page's **Rebuild index** is
+disabled, because rebuilding would change the index under the running evaluation. An
+evaluation started during a rebuild waits for it to finish. A failed run still records
+the answering tokens it spent.
+
 If the server stops mid-evaluation, its runs are marked failed ("Interrupted (server
 restarted)") the next time the app or CLI starts.
 

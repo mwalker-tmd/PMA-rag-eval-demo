@@ -86,3 +86,33 @@ def test_cli_explains_when_the_app_holds_the_index(cli, capsys):
         assert "already accessed" in capsys.readouterr().err
     finally:
         holder.close()
+
+
+
+def test_cli_prints_the_stale_test_set_warning(cli, capsys, data_dir):
+    import pymupdf
+
+    main, testset_id, _ = cli
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Changed corpus.")
+    doc.save(str(data_dir / "changed.pdf"))
+    assert main(["--testset", testset_id, "--pipelines", "baseline"]) == 0
+    out = capsys.readouterr().out
+    assert "Warning: Test set core-corpus v1 is stale" in out
+    assert out.count("same as the answering model") == 0
+
+
+def test_cli_reports_a_missing_corpus_instead_of_a_traceback(cli, capsys, data_dir):
+    import shutil
+
+    main, testset_id, _ = cli
+    shutil.rmtree(data_dir)
+    assert main(["--testset", testset_id]) == 1
+    assert "No PDFs found" in capsys.readouterr().err
+
+
+def test_cli_prints_the_judge_warning_once(cli, capsys, monkeypatch):
+    main, testset_id, _ = cli
+    monkeypatch.setenv("EVAL_JUDGE_MODEL", "fake-model")
+    assert main(["--testset", testset_id, "--pipelines", "baseline"]) == 0
+    assert capsys.readouterr().out.count("same as the answering model") == 1

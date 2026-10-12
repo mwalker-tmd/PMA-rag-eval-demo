@@ -29,7 +29,7 @@ from rag_chatbot.ports.llm import LLMPort
 from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.chat_service import ChatService
 from rag_chatbot.services.evaluation_service import EvaluationService
-from rag_chatbot.services.jobs import JobRunner
+from rag_chatbot.services.jobs import JobAlreadyRunning, JobRunner
 from rag_chatbot.services.sdg_service import SdgService
 
 
@@ -157,6 +157,15 @@ class Container:
         self.index.client.close()
 
     def rebuild_index(self, progress: Progress = lambda _msg: None) -> dict[str, int]:
+        """Rebuild the vector index. Refused (JobAlreadyRunning) while a job runs: an evaluation would
+        otherwise query collections mid-rebuild. Holds the start() lock, so an evaluation that starts
+        during the rebuild waits for it to finish."""
+        with self._start_lock:
+            if (active := self.jobs.active()) is not None:
+                raise JobAlreadyRunning(active)
+            return self._rebuild_locked(progress)
+
+    def _rebuild_locked(self, progress: Progress) -> dict[str, int]:
         # Compiled graphs hold references to the same collections/docstore paths, so they stay valid.
         return self.index.build(progress)
 
