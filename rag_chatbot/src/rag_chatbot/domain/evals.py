@@ -193,3 +193,39 @@ def validate_results(samples: list[SampleResult], aggregate: dict[str, float | N
     for i, sample in enumerate(samples):
         for metric, value in sample.scores.items():
             _check_score(f"samples[{i}].scores[{metric!r}]", value)
+
+
+# ---------- scoring (EvaluatorPort) ----------
+
+# Metric names as Ragas reports them. Order is the display order everywhere.
+DEFAULT_METRICS: tuple[str, ...] = (
+    "context_recall",  # LLMContextRecall: did retrieval find what the reference answer needs?
+    "faithfulness",  # Faithfulness: is the answer supported by the retrieved contexts?
+    "factual_correctness",  # FactualCorrectness: does the answer agree with the reference?
+    "answer_relevancy",  # ResponseRelevancy: does the answer address the question?
+    "context_entity_recall",  # ContextEntityRecall: are the reference's entities in the contexts?
+    "noise_sensitivity_relevant",  # NoiseSensitivity: how often do irrelevant contexts cause errors? (lower is better)
+)
+
+
+class EvaluationError(Exception):
+    """Scoring failed. The message carries the underlying error."""
+
+
+class UnknownMetric(ValueError):
+    """A requested metric isn't supported by the evaluator."""
+
+
+@dataclass(frozen=True)
+class EvalSample:
+    user_input: str
+    reference: str
+    response: str
+    retrieved_contexts: list[str]
+    reference_contexts: list[str]
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    scores: list[dict[str, float | None]]  # one dict per input sample, same order; NaN -> None
+    usage: TokenUsage | None  # judge usage

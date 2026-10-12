@@ -57,6 +57,7 @@ def settings(tmp_path: Path, data_dir: Path) -> Settings:
         datasets_dir=tmp_path / ".datasets",
         evals_dir=tmp_path / ".evals",
         sdg_provider="fake",
+        eval_provider="fake",
     )
 
 
@@ -127,4 +128,38 @@ def mocked_ragas(monkeypatch):
     monkeypatch.setattr("ragas.testset.transforms.default_transforms", fake_default_transforms)
     monkeypatch.setattr("ragas.testset.transforms.apply_transforms", fake_apply_transforms)
     monkeypatch.setattr("ragas.testset.synthesizers.default_query_distribution", fake_default_query_distribution)
+    return calls
+
+
+@pytest.fixture
+def mocked_ragas_evaluate(monkeypatch):
+    """Replace ragas.evaluate, binding every call against the real pinned signature first.
+
+    Records the dataset, metrics, judge, embeddings and run config it was given. Returns one score
+    row per sample: from `calls["rows"]` if a test scripts them, else 0.5 for every metric.
+    """
+    import types
+
+    import ragas
+
+    real_signature = inspect.signature(ragas.evaluate)
+    calls: dict = {"rows": None, "raise": None, "count": 0}
+
+    def fake_evaluate(*args, **kwargs):
+        bound = real_signature.bind(*args, **kwargs).arguments
+        calls.update(
+            count=calls["count"] + 1,
+            dataset=bound["dataset"],
+            metrics=bound["metrics"],
+            llm=bound["llm"],
+            embeddings=bound["embeddings"],
+            run_config=bound["run_config"],
+            show_progress=bound.get("show_progress"),
+        )
+        if calls["raise"]:
+            raise calls["raise"]
+        rows = calls["rows"] or [{m.name: 0.5 for m in bound["metrics"]} for _ in bound["dataset"].samples]
+        return types.SimpleNamespace(scores=rows)  # the only attribute the adapter reads
+
+    monkeypatch.setattr(ragas, "evaluate", fake_evaluate)
     return calls

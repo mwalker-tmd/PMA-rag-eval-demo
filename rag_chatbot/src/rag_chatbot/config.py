@@ -16,6 +16,12 @@ DEFAULT_SDG_PROVIDER = "ragas"
 DEFAULT_SDG_LLM_MODEL = "gpt-4.1"
 DEFAULT_SDG_EMBEDDING_MODEL = "text-embedding-3-small"
 
+# Evaluation (judge) defaults: non-reasoning, inexpensive, and not the answering model.
+DEFAULT_EVAL_PROVIDER = "ragas"
+DEFAULT_EVAL_JUDGE_MODEL = "gpt-4.1-mini"
+DEFAULT_EVAL_EMBEDDING_MODEL = "text-embedding-3-small"
+DEFAULT_EVAL_TIMEOUT_SECONDS = 360
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -36,6 +42,11 @@ class Settings:
     sdg_reasoning_effort: ReasoningEffort | None = None
     sdg_price_input_per_mtok: float | None = None  # USD per 1M tokens; both unset = no cost in estimates
     sdg_price_output_per_mtok: float | None = None
+    eval_provider: str = DEFAULT_EVAL_PROVIDER
+    eval_judge_model: str = DEFAULT_EVAL_JUDGE_MODEL
+    eval_embedding_model: str = DEFAULT_EVAL_EMBEDDING_MODEL
+    eval_judge_reasoning_effort: ReasoningEffort | None = None
+    eval_timeout_seconds: int = DEFAULT_EVAL_TIMEOUT_SECONDS
 
 
 def _resolve(path: str) -> Path:
@@ -69,6 +80,20 @@ def _optional_float(name: str) -> float | None:
     return value
 
 
+def _positive_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    if not raw.isdigit() or int(raw) < 1:
+        raise ValueError(f"{name} must be a whole number of seconds (1 or more), got {raw!r}")
+    return int(raw)
+
+
+def judge_matches_answer_model(settings: Settings) -> bool:
+    """True when the judge would grade its own answers (EVAL_JUDGE_MODEL == LLM_MODEL), which inflates scores."""
+    return settings.eval_judge_model.strip().casefold() == settings.llm_model.strip().casefold()
+
+
 def load_settings() -> Settings:
     load_dotenv(PROJECT_ROOT / ".env")
     default_effort = os.getenv("DEFAULT_REASONING_EFFORT", "medium").strip().lower()
@@ -90,4 +115,9 @@ def load_settings() -> Settings:
         sdg_reasoning_effort=_optional_effort(os.getenv("SDG_REASONING_EFFORT")),
         sdg_price_input_per_mtok=_optional_float("SDG_PRICE_INPUT_PER_MTOK"),
         sdg_price_output_per_mtok=_optional_float("SDG_PRICE_OUTPUT_PER_MTOK"),
+        eval_provider=(os.getenv("EVAL_PROVIDER") or DEFAULT_EVAL_PROVIDER).strip().lower(),
+        eval_judge_model=(os.getenv("EVAL_JUDGE_MODEL") or DEFAULT_EVAL_JUDGE_MODEL).strip(),
+        eval_embedding_model=(os.getenv("EVAL_EMBEDDING_MODEL") or DEFAULT_EVAL_EMBEDDING_MODEL).strip(),
+        eval_judge_reasoning_effort=_optional_effort(os.getenv("EVAL_JUDGE_REASONING_EFFORT")),
+        eval_timeout_seconds=_positive_int("EVAL_TIMEOUT_SECONDS", DEFAULT_EVAL_TIMEOUT_SECONDS),
     )

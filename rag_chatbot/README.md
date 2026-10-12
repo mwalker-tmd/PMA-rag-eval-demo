@@ -59,11 +59,14 @@ container.py — composition root; the only place concrete adapters are chosen
   - `datasets.py`: `DatasetRepository`, for saving and loading test sets
   - `testset_generator.py`: `TestsetGeneratorPort`, for generating synthetic test samples
   - `eval_runs.py`: `EvalRunRepository`, for saving evaluation runs and reading them back
+  - `evaluator.py`: `EvaluatorPort`, for scoring answers against reference answers
 - `adapters/` contains the implementations:
   - `llm/`: the OpenAI and fake LLM adapters. The UI's reasoning-level list comes from
     `supported_reasoning_efforts()`.
   - `datasets/`: the file-based and in-memory test set repositories
   - `eval_runs/`: the file-based and in-memory evaluation run repositories
+  - `evaluation/`: the Ragas and fake evaluators. Shared Ragas plumbing (judge LLM,
+    embeddings, preflight) is in `adapters/ragas_support.py`.
   - `sdg/`: the Ragas and fake test set generators. Ragas is imported only when
     generation actually runs.
 
@@ -222,8 +225,25 @@ The reasons:
 - **Cost.** Ragas makes many LLM calls: one generation run is dozens, and one evaluation
   is hundreds. Reasoning tokens multiply the cost of every one.
 
-If you use a reasoning model anyway, set `SDG_REASONING_EFFORT=low` and run the
-preflight check first.
+If you use a reasoning model anyway, set `SDG_REASONING_EFFORT=low` (or
+`EVAL_JUDGE_REASONING_EFFORT=low`) and run the preflight check first.
+
+**The judge** (`EVAL_JUDGE_MODEL`, default `gpt-4.1-mini`) scores answers on six Ragas
+metrics: `context_recall`, `faithfulness`, `factual_correctness`, `answer_relevancy`,
+`context_entity_recall` and `noise_sensitivity_relevant` (lower is better for the last
+one).
+- **It's call-heavy.** In a live check, scoring 2 answers on all six metrics took about
+  27,600 judge tokens, roughly 14k per answer. A 10-question test set run against all
+  three pipelines is therefore about 400k judge tokens. That's why the default judge is
+  an inexpensive model.
+- **It shouldn't be the answering model.** A model grading its own answers tends to be
+  generous. The app warns when `EVAL_JUDGE_MODEL` equals `LLM_MODEL`.
+- **Read metrics together.** In the same live check, a made-up answer scored 0.0 on
+  `faithfulness` and `factual_correctness`, but *higher* than the correct answer on
+  `answer_relevancy`. That metric only checks whether the answer addresses the
+  question, not whether it's true.
+- A metric that can't be computed for an answer is recorded as `None`. Ragas reports
+  it as `NaN`.
 
 **Sample counts:** Ragas doesn't return an exact number of samples. It splits the
 requested size across question types and rounds each share up, and it can fall short on
