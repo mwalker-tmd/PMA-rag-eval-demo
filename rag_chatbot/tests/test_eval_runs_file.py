@@ -1,6 +1,7 @@
 """Integration tests for FileEvalRunRepository: crash safety and persistence across instances."""
 
 import json
+import os
 
 import pytest
 from factories import make_run_manifest, make_sample_results
@@ -215,3 +216,92 @@ def test_two_processes_cannot_both_finish_a_run(root):
 def test_the_container_stores_runs_under_evals_dir(container, settings):
     assert isinstance(container.eval_runs, FileEvalRunRepository)
     assert container.eval_runs.root == settings.evals_dir
+
+
+# ---------- follow-up review regressions ----------
+
+
+def test_startup_cleanup_waits_for_in_flight_writes(root):
+    """A new instance must not delete another writer's temp file while that writer holds the lock."""
+    import threading
+
+    writer = FileEvalRunRepository(root)
+    m = make_run_manifest()
+    writer.create(m)
+    in_flight = root / m.run_id / ".manifest.json.tmp-inflight"
+    holding, release, init_done = threading.Event(), threading.Event(), threading.Event()
+
+    def write_slowly():
+        with writer._writing():  # the same lock a real write holds while its temp file exists
+            in_flight.write_text("{}")
+            holding.set()
+            release.wait(10)
+            os.replace(in_flight, root / m.run_id / "manifest.json.bak")  # the write finishes normally
+
+    def start_new_instance():
+        FileEvalRunRepository(root)
+        init_done.set()
+
+    t1 = threading.Thread(target=write_slowly)
+    t1.start()
+    assert holding.wait(10)
+    t2 = threading.Thread(target=start_new_instance)
+    t2.start()
+    assert not init_done.wait(0.3), "startup cleanup ran while a write was in flight"
+    assert in_flight.exists()
+    release.set()
+    t1.join(10)
+    t2.join(10)
+    assert init_done.is_set()
+    assert (root / m.run_id / "manifest.json.bak").exists()  # the in-flight write wasn't sabotaged
+
+
+def test_folders_from_interrupted_creates_are_reclaimed(root):
+    FileEvalRunRepository(root)
+    abandoned = root / "run_20261012-090000_baseline_ab12"
+    abandoned.mkdir()  # create() was killed after mkdir, before the manifest
+    (root / ".not-a-run").mkdir()
+
+    repo = FileEvalRunRepository(root)  # startup cleanup removes it
+    assert not abandoned.exists()
+    assert (root / ".not-a-run").exists()  # only run-shaped folders are touched
+    repo.create(make_run_manifest())
+    assert repo.get("run_20261012-090000_baseline_ab12").manifest.status is RunStatus.RUNNING
+
+
+def test_create_reclaims_an_abandoned_folder_without_a_restart(root):
+    repo = FileEvalRunRepository(root)
+    (root / "run_20261012-090000_baseline_ab12").mkdir()
+    repo.create(make_run_manifest())  # no RunAlreadyExists
+    assert len(repo.list()) == 1
+
+
+def test_failing_after_an_interrupted_complete_drops_its_uncommitted_samples(root, monkeypatch):
+    repo = FileEvalRunRepository(root)
+    m = make_run_manifest()
+    repo.create(m)
+
+    def crash(*_args, **_kwargs):
+        raise OSError("killed before the manifest was written")
+
+    monkeypatch.setattr(FileEvalRunRepository, "_write_manifest", staticmethod(crash))
+    with pytest.raises(OSError):
+        repo.complete(m.run_id, make_sample_results(3), {"faithfulness": 0.9}, judge_usage=None, answer_usage=None)
+    monkeypatch.undo()
+    assert (root / m.run_id / "samples.jsonl").exists()
+
+    recovered = FileEvalRunRepository(root)
+    recovered.fail(m.run_id, "Interrupted (server restarted)")  # no samples of its own
+    got = recovered.get(m.run_id)
+    assert got.manifest.status is RunStatus.FAILED
+    assert got.samples == []  # not the crashed complete()'s samples
+    assert not (root / m.run_id / "samples.jsonl").exists()
+
+
+def test_progress_updates_leave_samples_alone(root, monkeypatch):
+    repo = FileEvalRunRepository(root)
+    m = make_run_manifest()
+    repo.create(m)
+    repo.update_progress(m.run_id, 0.5, "halfway")
+    repo.complete(m.run_id, make_sample_results(2), {}, judge_usage=None, answer_usage=None)
+    assert len(repo.get(m.run_id).samples) == 2

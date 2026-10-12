@@ -188,7 +188,11 @@ Evaluation runs are saved under `EVALS_DIR` (default `.evals/`), one folder per 
 - **Crash-safe:** every file is written to a temporary file and moved into place, so a
   reader sees either the previous version or the next, never half a file. The manifest
   is written last, so its status is what counts. A run's samples are only shown once
-  it's finished. A run left `running` by a crash can still be marked failed.
+  it's finished. A run left `running` by a crash can still be marked failed. Failing it
+  without samples discards anything an interrupted completion left behind.
+- **Startup cleanup:** a new repository removes leftover temp files, and run folders
+  whose creation was interrupted before the manifest was written. It does this while
+  holding the write lock, so it never touches another writer's in-progress files.
 - **One writer at a time:** writes take a lock shared by every repository instance in
   the process, plus a file lock on `.evals/.lock` across processes. So two writers can
   never both finish the same run.

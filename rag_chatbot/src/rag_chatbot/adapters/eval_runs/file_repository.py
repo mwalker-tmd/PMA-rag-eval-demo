@@ -8,7 +8,9 @@ Layout, one folder per run:
 Every file is written to a temporary file in the same folder and moved into place with
 `os.replace`, so a reader (or a crash) only ever sees the previous or the next complete
 version. On complete/fail the samples are written first and the manifest last: the manifest's
-status is the commit point. Leftover temporary files are removed when the repository is created.
+status is the commit point. When the repository is created it cleans up after interrupted writes
+(under the write lock, so it never touches another writer's in-flight files): leftover temporary
+files, and run folders that never got a manifest because their create() was interrupted.
 
 Writes are serialized for every instance and process that uses the same folder: an in-process
 lock shared by all instances on that folder, plus an exclusive file lock on `<root>/.lock`. The
@@ -78,13 +80,19 @@ class FileEvalRunRepository:
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = _root_lock(self.root)
         self._clock = clock
-        for leftover in self.root.glob(f"*/.*{TMP_MARKER}*"):
-            leftover.unlink(missing_ok=True)
+        with self._writing():  # wait for in-flight writes; never delete another writer's temp files
+            for leftover in self.root.glob(f"*/.*{TMP_MARKER}*"):
+                leftover.unlink(missing_ok=True)
+            for folder in self.root.iterdir():
+                if _is_abandoned(folder):
+                    shutil.rmtree(folder, ignore_errors=True)
 
     def create(self, manifest: EvalRunManifest) -> None:
         validate_new_run(manifest)
         folder = self.root / manifest.run_id
         with self._writing():
+            if _is_abandoned(folder):  # an interrupted create left it without a manifest: reclaim it
+                shutil.rmtree(folder, ignore_errors=True)
             try:
                 folder.mkdir()  # exclusive: an existing folder means the id is taken
             except FileExistsError:
@@ -127,7 +135,7 @@ class FileEvalRunRepository:
         self._change(
             run_id,
             lambda m: replace(m, status=RunStatus.FAILED, finished_at=self._clock(), error=error),
-            samples=samples,
+            samples=samples if samples is not None else [],  # none given: commit an empty set, not leftovers
             validate=lambda: validate_results(samples or [], {}),
         )
 
@@ -177,9 +185,11 @@ class FileEvalRunRepository:
             if manifest.is_final:
                 raise RunFinalized(f"{run_id} is {manifest.status.value}")
             validate()
-            if samples is not None:
+            if samples:
                 lines = "".join(json.dumps(sample_to_dict(s), ensure_ascii=False) + "\n" for s in samples)
                 _atomic_write(folder / SAMPLES, lines)
+            elif samples is not None:  # finishing with no samples: drop any left by an interrupted complete()/fail()
+                (folder / SAMPLES).unlink(missing_ok=True)
             self._write_manifest(folder, change(manifest))  # last: the manifest's status commits the change
 
     def _folder(self, run_id: str) -> Path:
@@ -195,6 +205,16 @@ class FileEvalRunRepository:
     @staticmethod
     def _write_manifest(folder: Path, manifest: EvalRunManifest) -> None:
         _atomic_write(folder / MANIFEST, json.dumps(manifest_to_dict(manifest), indent=2, ensure_ascii=False))
+
+
+def _is_abandoned(folder: Path) -> bool:
+    """A run folder whose create() was interrupted before its manifest was written."""
+    return (
+        folder.is_dir()
+        and not folder.name.startswith(".")
+        and RUN_ID_PATTERN.fullmatch(folder.name) is not None
+        and not (folder / MANIFEST).exists()
+    )
 
 
 def _atomic_write(path: Path, text: str) -> None:
