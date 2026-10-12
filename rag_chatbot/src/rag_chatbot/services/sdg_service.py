@@ -6,13 +6,14 @@ types below, the `SdgService` methods, and the errors they raise.
 
 from __future__ import annotations
 
-import re
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
 from rag_chatbot.domain.datasets import (
+    TESTSET_NAME_PATTERN,
     CorpusFingerprint,
     GenerationError,
     GenerationProgress,
@@ -31,7 +32,6 @@ from rag_chatbot.ports.datasets import DatasetRepository
 from rag_chatbot.ports.testset_generator import TestsetGeneratorPort
 from rag_chatbot.services.jobs import JobId, JobRunner, JobStatus, ProgressReporter
 
-NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MIN_SIZE, MAX_SIZE = 1, 100
 
 # Base estimate constants. Rough on purpose: calibration against a past test set's actual
@@ -41,6 +41,8 @@ KG_INPUT_PER_CORPUS_TOKEN = 3.0  # graph build: summaries, headlines, entities, 
 KG_OUTPUT_PER_CORPUS_TOKEN = 0.3
 SAMPLE_INPUT_TOKENS = 1_800  # per generated sample (measured ~1,770 with gpt-4.1 on the fixture corpus)
 SAMPLE_OUTPUT_TOKENS = 200  # (measured ~180)
+
+SAVE_ATTEMPTS = 5
 
 # Progress split when the knowledge graph is built in this run.
 KG_SHARE = 0.7
@@ -92,8 +94,8 @@ class SdgService:
         self._generator = generator
         self._jobs = jobs
         self._data_dir = data_dir
-        self._price_in = price_input_per_mtok
-        self._price_out = price_output_per_mtok
+        self._price_in = _validated_price("price_input_per_mtok", price_input_per_mtok)
+        self._price_out = _validated_price("price_output_per_mtok", price_output_per_mtok)
         self._clock = clock
         self._corpus_cache: tuple[str, list[SourceDocument]] | None = None  # (digest, docs)
 
@@ -165,7 +167,7 @@ class SdgService:
 
     def _validate(self, req: GenerateTestsetRequest) -> bool:
         """Raise InvalidRequest / TestsetNotFound; return whether a saved graph will be reused."""
-        if not isinstance(req.name, str) or not NAME_PATTERN.match(req.name):
+        if not isinstance(req.name, str) or not TESTSET_NAME_PATTERN.fullmatch(req.name):
             raise InvalidRequest("Name must be 1–64 characters: letters, digits, '-' or '_'.")
         if isinstance(req.size, bool) or not isinstance(req.size, int) or not MIN_SIZE <= req.size <= MAX_SIZE:
             raise InvalidRequest(f"Size must be a whole number from {MIN_SIZE} to {MAX_SIZE}.")
@@ -186,9 +188,13 @@ class SdgService:
 
     def _save(self, req: GenerateTestsetRequest, fingerprint: CorpusFingerprint, result) -> TestsetSummary:
         digest = samples_sha256(result.samples)
-        for _ in range(3):  # another process (CLI vs. app) may take the same version between read and save
+        # The repository rejects a (name, version) that's already taken, even by another process
+        # (CLI vs. app). On a clash, re-read the next free version and try again.
+        for _ in range(SAVE_ATTEMPTS):
+            version = self._datasets.next_version(req.name)
+            # parent: the newest version actually saved right now. A version another writer has claimed
+            # but not finished saving isn't linked (its save could still fail and leave a dangling parent).
             previous = self._datasets.latest(req.name)
-            version = previous.version + 1 if previous else 1
             created_at = self._clock()
             manifest = TestsetManifest(
                 id=new_testset_id(created_at, req.name, version, digest),
@@ -233,6 +239,14 @@ class SdgService:
         if self._price_in is None or self._price_out is None:
             return None
         return round(tokens_in / 1e6 * self._price_in + tokens_out / 1e6 * self._price_out, 4)
+
+
+def _validated_price(name: str, value: float | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite, non-negative number of USD per 1M tokens, got {value!r}")
+    return float(value)
 
 
 def _corpus_tokens(docs: list[SourceDocument]) -> int:

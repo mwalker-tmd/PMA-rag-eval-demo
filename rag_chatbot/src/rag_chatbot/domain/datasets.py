@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from rag_chatbot.domain.models import TokenUsage
+
+
+# Test set names: 1–64 letters, digits, '-' or '_'. Always use .fullmatch(): with .match(), "$"
+# would also accept a trailing newline.
+TESTSET_NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 class TestsetNotFound(Exception):
@@ -162,6 +168,8 @@ def sort_newest_first(summaries: list[TestsetSummary]) -> list[TestsetSummary]:
 def validate_for_save(testset: Testset, knowledge_graph: bytes | None) -> None:
     """Integrity checks every DatasetRepository applies before saving. Raises ValueError."""
     m = testset.manifest
+    if not isinstance(m.name, str) or not TESTSET_NAME_PATTERN.fullmatch(m.name):
+        raise ValueError(f"Invalid test set name {m.name!r}: use 1–64 letters, digits, '-' or '_'")
     if m.size != len(testset.samples):
         raise ValueError(f"manifest.size={m.size} but {len(testset.samples)} samples were given")
     if m.samples_sha256 != samples_sha256(testset.samples):

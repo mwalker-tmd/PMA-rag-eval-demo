@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,9 +60,12 @@ def _optional_float(name: str) -> float | None:
     if not raw:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
-        raise ValueError(f"{name} must be a number (USD per 1M tokens), got {raw!r}") from None
+        value = None
+    if value is None or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite, non-negative number (USD per 1M tokens), got {raw!r}")
+    return value
 
 
 def load_settings() -> Settings:

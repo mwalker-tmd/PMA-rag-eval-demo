@@ -101,7 +101,8 @@ uv run python scripts/generate_testset.py --name core-corpus --size 20 --reuse-k
 1. **Estimate and confirm.** The CLI prints the model, the corpus size and an estimate
    of input and output tokens, then asks `Proceed? [y/N]`. `--yes` skips the prompt. A
    cost is shown only when both `SDG_PRICE_INPUT_PER_MTOK` and
-   `SDG_PRICE_OUTPUT_PER_MTOK` are set. Prices change, so none are built in.
+   `SDG_PRICE_OUTPUT_PER_MTOK` are set. Each must be a finite, non-negative number.
+   Prices change, so none are built in.
 2. **The estimate gets better with use.** The first estimate uses rough constants
    (documented in `services/sdg_service.py`). After that, it's calibrated against the
    actual usage of your most recent test set made from the same corpus with the same
@@ -131,7 +132,13 @@ per test set:
 - **IDs:** `ts_<yyyymmdd>_<hash8>`, where the hash covers the name, the version and
   the samples.
 - **Versions:** a new test set with an existing name becomes the next version, with
-  `parent_id` pointing to the previous one. Versions are never overwritten.
+  `parent_id` pointing to the newest version saved at that moment. Versions are never
+  overwritten. Each name and version can be saved only once, even when the CLI and the
+  app save at the same time. A save first claims `.datasets/.versions/<name>@<version>`
+  with an exclusive create, and the loser retries with the next number. A save
+  interrupted by a crash leaves its claim behind, so that version number is skipped,
+  which leaves a gap in the numbering but doesn't block the name.
+- **Names:** 1–64 letters, digits, `-` or `_`.
 - **Corpus fingerprint:** the SHA-256 of every PDF in `data/` when the test set was
   made. If any PDF has since been added, removed or changed, the test set is **stale**.
   Its questions may refer to content that no longer exists, so its scores aren't

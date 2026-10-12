@@ -10,6 +10,7 @@ import pytest
 from factories import make_testset
 from qdrant_client import QdrantClient
 
+from rag_chatbot.adapters.datasets.file_repository import FileDatasetRepository
 from rag_chatbot.adapters.datasets.memory_repository import InMemoryDatasetRepository
 from rag_chatbot.adapters.sdg.fake_generator import FakeTestsetGenerator
 from rag_chatbot.domain.datasets import GenerationError, GenerationResult, TestsetNotFound
@@ -92,12 +93,13 @@ def test_reusing_an_unknown_test_set_raises_before_generating(service, generator
         req(name="has space"),
         req(name="x" * 65),
         req(name="../escape"),
+        req(name="ok\n"),
         req(size=0),
         req(size=101),
         req(size=True),
         GenerateTestsetRequest(name="ok", size="10"),
     ],
-    ids=["empty-name", "space", "too-long", "path", "size-0", "size-101", "size-bool", "size-str"],
+    ids=["empty-name", "space", "too-long", "path", "trailing-newline", "size-0", "size-101", "size-bool", "size-str"],
 )
 def test_invalid_requests_are_rejected(service, generator, bad):
     with pytest.raises(InvalidRequest):
@@ -381,3 +383,93 @@ def test_cli_runs_while_the_app_holds_the_index_lock(cli_env, tmp_path):
         assert cli_env(["--name", "core-corpus", "--size", "1", "--yes"]) == 0
     finally:
         holder.close()
+
+
+# ---------- review regressions ----------
+
+
+class TaggedGenerator(FakeTestsetGenerator):
+    """Like the fake, but each instance writes different questions (so concurrent runs get different ids)."""
+
+    def __init__(self, tag):
+        super().__init__()
+        self.tag = tag
+
+    def generate(self, documents, size, **kwargs):
+        result = super().generate(documents, size, **kwargs)
+        samples = [replace(s, user_input=f"{s.user_input} [{self.tag}]") for s in result.samples]
+        return replace(result, samples=samples)
+
+
+class RacingRepo:
+    """A FileDatasetRepository whose first next_version() waits for the other writer, forcing both to read v1."""
+
+    def __init__(self, root, barrier):
+        self._repo = FileDatasetRepository(root)
+        self._barrier = barrier
+        self._first = True
+
+    def __getattr__(self, name):
+        return getattr(self._repo, name)
+
+    def next_version(self, name):
+        version = self._repo.next_version(name)
+        if self._first:
+            self._first = False
+            self._barrier.wait(TIMEOUT)
+        return version
+
+
+def test_concurrent_generations_of_one_name_get_distinct_versions(tmp_path, data_dir):
+    root, barrier, results, errors = tmp_path / ".datasets", threading.Barrier(2), [], []
+
+    def run(tag):
+        service = make_service(RacingRepo(root, barrier), TaggedGenerator(tag), data_dir)
+        try:
+            results.append(service.generate(req(size=2)))
+        except Exception as e:  # surfaced below
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(tag,)) for tag in ("app", "cli")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(TIMEOUT)
+
+    assert errors == []
+    assert sorted(r.version for r in results) == [1, 2]
+    saved = FileDatasetRepository(root).list()
+    assert sorted(s.version for s in saved) == [1, 2]
+    v2 = next(r for r in results if r.version == 2)
+    v1 = next(r for r in results if r.version == 1)
+    # parent_id is the newest version *saved* when v2 was saved. If v2 saved while v1 was still being
+    # written, there was none yet; it must never point anywhere else.
+    assert v2.parent_id in (None, v1.id)
+    assert v1.parent_id is None
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), "2.0", True])
+def test_invalid_prices_are_rejected(repo, generator, data_dir, bad):
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        make_service(repo, generator, data_dir, price_input_per_mtok=bad, price_output_per_mtok=1.0)
+
+
+def test_zero_prices_are_allowed(repo, generator, data_dir):
+    est = make_service(repo, generator, data_dir, price_input_per_mtok=0, price_output_per_mtok=0).estimate(req())
+    assert est.est_cost_usd == 0
+
+
+@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "-inf", "cheap"])
+def test_config_rejects_invalid_price_env_values(monkeypatch, raw):
+    from rag_chatbot.config import load_settings
+
+    monkeypatch.setattr("rag_chatbot.config.load_dotenv", lambda *_a, **_k: None)
+    monkeypatch.setenv("SDG_PRICE_INPUT_PER_MTOK", raw)
+    with pytest.raises(ValueError, match="SDG_PRICE_INPUT_PER_MTOK"):
+        load_settings()
+
+
+def test_cli_reports_an_invalid_price_and_exits_non_zero(cli_env, monkeypatch, capsys):
+    monkeypatch.setenv("SDG_PRICE_OUTPUT_PER_MTOK", "-3")
+    assert cli_env(["--name", "core-corpus", "--size", "1", "--yes"]) == 1
+    assert "SDG_PRICE_OUTPUT_PER_MTOK" in capsys.readouterr().err

@@ -125,3 +125,23 @@ def test_requested_size_round_trips_and_reaches_the_summary(repo):
     assert repo.get(ts.manifest.id).manifest.requested_size == 5
     assert repo.list()[0].requested_size == 5
     assert repo.list()[0].size == 2
+
+
+def test_a_taken_name_and_version_is_rejected_even_with_different_samples(repo):
+    v1 = make_testset(version=1)
+    repo.save(v1)
+    rival = make_testset(version=1, tag=" (rival)")  # same name and version, different samples -> different id
+    assert rival.manifest.id != v1.manifest.id
+    with pytest.raises(TestsetAlreadyExists):
+        repo.save(rival)
+    assert [s.id for s in repo.list()] == [v1.manifest.id]
+    assert repo.next_version("core-corpus") == 2
+
+
+@pytest.mark.parametrize("bad_name", ["ok\n", "has space", "", "x" * 65, "a/b", "a@b"])
+def test_invalid_names_are_rejected(repo, bad_name):
+    with pytest.raises(ValueError, match="Invalid test set name"):
+        repo.save(make_testset(name="placeholder", n=1).__class__(
+            manifest=replace(make_testset(n=1).manifest, name=bad_name), samples=make_testset(n=1).samples
+        ))
+    assert repo.list() == []
