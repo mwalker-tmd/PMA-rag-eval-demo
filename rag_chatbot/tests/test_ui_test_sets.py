@@ -254,3 +254,49 @@ def test_a_shortfall_shows_requested_and_generated_counts(make_app):
     open_test_sets(at)
     generate(at, container, size=5)
     assert list(saved_rows(at)["Questions"]) == ["2 of 5"]
+
+
+# ---------- review regressions ----------
+
+
+def test_a_job_pushed_out_of_history_does_not_break_the_page(make_app):
+    from rag_chatbot.services.jobs import HISTORY_LIMIT
+
+    at, container = make_app()
+    open_test_sets(at)
+    generate(at, container)
+    assert any("Saved test set" in s.value for s in at.success)
+
+    for i in range(HISTORY_LIMIT + 1):  # unrelated jobs push this session's job out of the runner's history
+        container.jobs.wait(container.jobs.submit("other", f"filler {i}", lambda report: None), timeout=TIMEOUT)
+    at.run()
+    assert not at.exception
+    assert at.session_state["sdg_job_id"] is None
+    assert not any("Saved test set" in s.value for s in at.success)
+    assert list(saved_rows(at)["Version"]) == [1]  # the page still renders normally
+
+
+def test_a_generation_started_in_another_tab_is_followed_to_completion(make_app):
+    generator = BlockingGenerator()
+    tab_a, container = make_app(generator)
+    tab_b = AppTest.from_file(str(ROOT / TEST_SETS_PAGE), default_timeout=TIMEOUT)  # same container, new session
+    open_test_sets(tab_a)
+    open_test_sets(tab_b)
+
+    button(tab_a, "Estimate").click().run()
+    button(tab_a, "Confirm and generate").click().run()
+    assert generator.started.wait(TIMEOUT)
+
+    tab_b.run()  # tab B's job panel polls while A's job runs
+    assert not tab_b.exception
+    assert tab_b.get("progress")
+    assert button(tab_b, "Confirm and generate").disabled and tab_b.text_input(key="sdg_name").disabled
+    assert tab_b.session_state["sdg_job_id"] == tab_a.session_state["sdg_job_id"]
+
+    generator.release.set()
+    container.jobs.wait(tab_a.session_state["sdg_job_id"], timeout=TIMEOUT)
+    tab_b.run()  # the next poll
+    assert not tab_b.exception
+    assert any("Saved test set" in s.value and "another tab" in s.value for s in tab_b.success)
+    assert list(saved_rows(tab_b)["Version"]) == [1]
+    assert not button(tab_b, "Estimate").disabled

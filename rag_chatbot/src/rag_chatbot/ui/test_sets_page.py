@@ -8,7 +8,7 @@ from __future__ import annotations
 import streamlit as st
 
 from rag_chatbot.domain.datasets import TestsetNotFound
-from rag_chatbot.services.jobs import JobAlreadyRunning, JobState, JobStatus
+from rag_chatbot.services.jobs import JobAlreadyRunning, JobNotFound, JobState
 from rag_chatbot.services.sdg_service import (
     MAX_SIZE,
     MIN_SIZE,
@@ -23,7 +23,8 @@ container = container_or_stop()
 sdg = container.sdg  # never container.start(): this page must not build the vector index
 
 ss = st.session_state
-ss.setdefault("sdg_job_id", None)  # the generation this session started
+ss.setdefault("sdg_job_id", None)  # the generation this session follows: started here, or seen running
+ss.setdefault("sdg_job_started_here", False)
 ss.setdefault("sdg_job_seen_active", False)  # so the page refreshes once when that job ends
 ss.setdefault("sdg_estimate", None)  # (inputs, GenerationEstimate) for the inputs it was made for
 ss.setdefault("sdg_form_error", None)
@@ -45,30 +46,34 @@ def _testset_label(item: TestsetListItem) -> str:
 
 @st.fragment(run_every="2s")
 def job_panel() -> None:
-    status: JobStatus | None = sdg.active_job()
-    mine = ss.sdg_job_id
-    if status is None and mine:
-        status = sdg.job_status(mine)
-    if status is None:
-        return
-
-    if status.state.is_active:
-        ss.sdg_job_seen_active = ss.sdg_job_seen_active or status.job_id == mine
-        if status.kind != "sdg":
-            st.info(f"Another job is running: {status.label}. Generation is available when it finishes.")
+    active = sdg.active_job()
+    if active is not None:
+        if active.kind != "sdg":
+            st.info(f"Another job is running: {active.label}. Generation is available when it finishes.")
             return
-        st.progress(status.progress or 0.0, text=f"{status.label} — {status.message}")
+        if active.job_id != ss.sdg_job_id:  # started in another tab: follow it like our own
+            ss.sdg_job_id, ss.sdg_job_started_here, ss.sdg_job_seen_active = active.job_id, False, True
+            st.rerun(scope="app")  # lock the form, which is outside this fragment
+        ss.sdg_job_seen_active = True
+        st.progress(active.progress or 0.0, text=f"{active.label} — {active.message}")
         return
 
-    if status.job_id != mine:
+    if not ss.sdg_job_id:
         return
+    try:
+        status = sdg.job_status(ss.sdg_job_id)
+    except JobNotFound:  # pushed out of the runner's history by later jobs: nothing left to show
+        ss.sdg_job_id, ss.sdg_job_started_here, ss.sdg_job_seen_active = None, False, False
+        return
+
+    elsewhere = "" if ss.sdg_job_started_here else " (started in another tab)"
     if status.state is JobState.COMPLETED:
-        st.success(f"Saved test set `{status.result_id}`.")
+        st.success(f"Saved test set `{status.result_id}`{elsewhere}.")
         if ss.sdg_job_seen_active:
             ss.sdg_goto = status.result_id
     else:
-        st.error(f"Generation failed: {status.error}")
-    if ss.sdg_job_seen_active:  # it finished while this panel was polling: refresh the form and the list
+        st.error(f"Generation failed{elsewhere}: {status.error}")
+    if ss.sdg_job_seen_active:  # it finished while this panel was watching: refresh the form and the list
         ss.sdg_job_seen_active = False
         st.rerun(scope="app")
 
@@ -141,6 +146,7 @@ elif ss.sdg_estimate is not None and not busy:
 if st.button("Confirm and generate", type="primary", disabled=busy or estimate is None):
     try:
         ss.sdg_job_id = sdg.start_generation(request)
+        ss.sdg_job_started_here = True
         ss.sdg_job_seen_active = True
         ss.sdg_estimate = None
         ss.sdg_form_error = None
